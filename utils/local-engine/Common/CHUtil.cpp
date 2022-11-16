@@ -25,6 +25,9 @@
 #include <Poco/Logger.h>
 #include <Common/CHUtil.h>
 #include <Common/typeid_cast.h>
+#include <Core/ColumnsWithTypeAndName.h>
+#include <fmt/core.h>
+#include <DataTypes/DataTypesNumber.h>
 
 namespace DB
 {
@@ -257,6 +260,21 @@ DB::NamesAndTypesList MergeTreeUtil::getSchemaFromMergeTreePart(const fs::path &
     return names_types_list;
 }
 
+void ProfileEventsUtil::logProfileEvents(std::map<String, size_t> events)
+{
+    auto * logger = &Poco::Logger::get("ProfileEventsUtil");
+    if (events.empty() || !logger->debug())
+    {
+        return;
+    }
+
+    std::vector<String> event_strings;
+    for (auto& [name, count] : events)
+    {
+        event_strings.emplace_back(fmt::format("\t{} : {}", name, count));
+    }
+    LOG_DEBUG(logger, "Current Profile Counters:\n{}\n", fmt::join(event_strings, "\n"));
+}
 
 NestedColumnExtractHelper::NestedColumnExtractHelper(const DB::Block & block_, bool case_insentive_)
     : block(block_)

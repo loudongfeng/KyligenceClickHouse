@@ -11,16 +11,15 @@
 #include <Core/Names.h>
 #include <Core/NamesAndTypes.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
+#include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDate32.h>
 #include <DataTypes/DataTypeDateTime64.h>
+#include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeSet.h>
 #include <DataTypes/DataTypeString.h>
+#include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypesDecimal.h>
 #include <DataTypes/DataTypesNumber.h>
-#include <DataTypes/DataTypeDateTime64.h>
-#include <DataTypes/DataTypeArray.h>
-#include <DataTypes/DataTypeMap.h>
-#include <DataTypes/DataTypeTuple.h>
 #include <Functions/FunctionFactory.h>
 #include <Functions/registerFunctions.h>
 #include <Interpreters/ActionsDAG.h>
@@ -48,11 +47,13 @@
 #include <google/protobuf/wrappers.pb.h>
 #include <Poco/StringTokenizer.h>
 #include <Poco/Util/MapConfiguration.h>
-#include <Common/DebugUtils.h>
 #include <Common/JoinHelper.h>
 #include <Common/MergeTreeTool.h>
 #include <Common/StringUtils.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
+#include <Interpreters/QueryPriorities.h>
+#include <Interpreters/ProcessList.h>
+
 
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/QueryPlan/SortingStep.h>
@@ -311,9 +312,9 @@ QueryPlanPtr SerializedPlanParser::parseReadRealWithJavaIter(const substrait::Re
 
 void SerializedPlanParser::addRemoveNullableStep(QueryPlan & plan, std::vector<String> columns)
 {
-    if (columns.empty()) return;
-    auto remove_nullable_actions_dag
-        = std::make_shared<ActionsDAG>(blockToNameAndTypeList(plan.getCurrentDataStream().header));
+    if (columns.empty())
+        return;
+    auto remove_nullable_actions_dag = std::make_shared<ActionsDAG>(blockToNameAndTypeList(plan.getCurrentDataStream().header));
     removeNullable(columns, remove_nullable_actions_dag);
     auto expression_step = std::make_unique<ExpressionStep>(plan.getCurrentDataStream(), remove_nullable_actions_dag);
     expression_step->setStepDescription("Remove nullable properties");
@@ -334,7 +335,7 @@ QueryPlanPtr SerializedPlanParser::parseMergeTreeTable(const substrait::ReadRel 
     else
     {
         // For count(*) case, there will be an empty base_schema, so we try to read at least once column
-        auto all_parts_dir = MergeTreeUtil::getAllMergeTreeParts( std::filesystem::path("/") / merge_tree_table.relative_path);
+        auto all_parts_dir = MergeTreeUtil::getAllMergeTreeParts(std::filesystem::path("/") / merge_tree_table.relative_path);
         if (all_parts_dir.empty())
         {
             throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Empty mergetree directory: {}", merge_tree_table.relative_path);
@@ -393,13 +394,14 @@ QueryPlanPtr SerializedPlanParser::parseMergeTreeTable(const substrait::ReadRel 
     if (!not_null_columns.empty())
     {
         auto input_header = query->getCurrentDataStream().header;
-        std::erase_if(not_null_columns, [input_header](auto item) -> bool {return !input_header.has(item);});
+        std::erase_if(not_null_columns, [input_header](auto item) -> bool { return !input_header.has(item); });
         addRemoveNullableStep(*query, not_null_columns);
     }
     return query;
 }
 
-PrewhereInfoPtr SerializedPlanParser::parsePreWhereInfo(const substrait::Expression & rel, Block & input, std::vector<String>& not_nullable_columns)
+PrewhereInfoPtr
+SerializedPlanParser::parsePreWhereInfo(const substrait::Expression & rel, Block & input, std::vector<String> & not_nullable_columns)
 {
     auto prewhere_info = std::make_shared<PrewhereInfo>();
     prewhere_info->prewhere_actions = std::make_shared<ActionsDAG>(input.getNamesAndTypesList());
@@ -407,7 +409,7 @@ PrewhereInfoPtr SerializedPlanParser::parsePreWhereInfo(const substrait::Express
     // for in function
     if (rel.has_singular_or_list())
     {
-        const auto *in_node = parseArgument(prewhere_info->prewhere_actions, rel);
+        const auto * in_node = parseArgument(prewhere_info->prewhere_actions, rel);
         prewhere_info->prewhere_actions->addOrReplaceInOutputs(*in_node);
         filter_name = in_node->result_name;
     }
@@ -437,7 +439,7 @@ PrewhereInfoPtr SerializedPlanParser::parsePreWhereInfo(const substrait::Express
     {
         prewhere_info->prewhere_actions->removeUnusedActions(Names{filter_name}, false, true);
         prewhere_info->prewhere_actions->projectInput(false);
-        for (const auto& name : input.getNames())
+        for (const auto & name : input.getNames())
         {
             prewhere_info->prewhere_actions->tryRestoreColumn(name);
         }
@@ -801,7 +803,8 @@ QueryPlanPtr SerializedPlanParser::parseOp(const substrait::Rel & rel, std::list
                         = ActionsDAG::makeConvertingActions(source, target, DB::ActionsDAG::MatchColumnsMode::Position);
                     if (convert_action)
                     {
-                        QueryPlanStepPtr convert_step = std::make_unique<ExpressionStep>(query_plan->getCurrentDataStream(), convert_action);
+                        QueryPlanStepPtr convert_step
+                            = std::make_unique<ExpressionStep>(query_plan->getCurrentDataStream(), convert_action);
                         convert_step->setStepDescription("Convert Aggregate Output");
                         query_plan->addStep(std::move(convert_step));
                     }
@@ -929,10 +932,8 @@ void SerializedPlanParser::addPreProjectStepIfNeeded(
             throw Exception(ErrorCodes::UNKNOWN_TYPE, "unsupported aggregate argument type {}.", arg.DebugString());
         }
 
-        if (which_measure_type.isNullable() &&
-            measure.measure().phase() == substrait::AGGREGATION_PHASE_INITIAL_TO_INTERMEDIATE &&
-            !expression->findInOutputs(measure_name).result_type->isNullable()
-            )
+        if (which_measure_type.isNullable() && measure.measure().phase() == substrait::AGGREGATION_PHASE_INITIAL_TO_INTERMEDIATE
+            && !expression->findInOutputs(measure_name).result_type->isNullable())
         {
             to_wrap_nullable.emplace_back(measure_name);
             need_pre_project = true;
@@ -1631,9 +1632,7 @@ QueryPlanPtr SerializedPlanParser::parse(const std::string & plan)
 QueryPlanPtr SerializedPlanParser::parseJson(const std::string & json_plan)
 {
     auto plan_ptr = std::make_unique<substrait::Plan>();
-    google::protobuf::util::JsonStringToMessage(
-        google::protobuf::stringpiece_internal::StringPiece(json_plan.c_str()),
-        plan_ptr.get());
+    google::protobuf::util::JsonStringToMessage(google::protobuf::stringpiece_internal::StringPiece(json_plan.c_str()), plan_ptr.get());
     return parse(std::move(plan_ptr));
 }
 
@@ -1853,8 +1852,8 @@ void SerializedPlanParser::removeNullable(std::vector<String> require_columns, A
     }
 }
 
-void SerializedPlanParser::wrapNullable(std::vector<String> columns, ActionsDAGPtr actionsDag,
-                                        std::map<std::string, std::string>& nullable_measure_names)
+void SerializedPlanParser::wrapNullable(
+    std::vector<String> columns, ActionsDAGPtr actionsDag, std::map<std::string, std::string> & nullable_measure_names)
 {
     for (const auto & item : columns)
     {
@@ -1884,11 +1883,19 @@ void LocalExecutor::execute(QueryPlanPtr query_plan)
     Stopwatch stopwatch;
     stopwatch.start();
     QueryPlanOptimizationSettings optimization_settings{.optimize_plan = true};
+    DB::QueryPriorities priorities;
+    auto query_status = std::make_shared<DB::QueryStatus>(context,
+                                                          "query",
+                                                          context->getClientInfo(),
+                                                          priorities.insert(static_cast<int>(context->getSettingsRef().priority)),
+                                                          std::move(DB::CurrentThread::getGroup()),
+                                                          DB::IAST::QueryKind::Select, 0);
     auto pipeline_builder = current_query_plan->buildQueryPipeline(
         optimization_settings,
         BuildQueryPipelineSettings{
             .actions_settings = ExpressionActionsSettings{
-                .can_compile_expressions = true, .min_count_to_compile_expression = 3, .compile_expressions = CompileExpressions::yes}});
+                .can_compile_expressions = true, .min_count_to_compile_expression = 3, .compile_expressions = CompileExpressions::yes},
+        .process_list_element = query_status});
     query_pipeline = QueryPipelineBuilder::getPipeline(std::move(*pipeline_builder));
     auto t_pipeline = stopwatch.elapsedMicroseconds();
     executor = std::make_unique<PullingPipelineExecutor>(query_pipeline);
@@ -1970,8 +1977,38 @@ Block & LocalExecutor::getHeader()
 {
     return header;
 }
-LocalExecutor::LocalExecutor(QueryContext & _query_context)
-    : query_context(_query_context)
+std::map<String, size_t> LocalExecutor::getCurrentEventCounters()
+{
+    std::map<String, size_t> event_counters;
+    auto metrics = context->getConfigRef().getString("metrics_on_spark_ui", "");
+    static std::unordered_map<String, size_t> metric_index_map;
+    static std::once_flag init_flag;
+    std::call_once(
+        init_flag,
+        []() -> void
+        {
+            for (size_t i = 0; i < ProfileEvents::Counters::num_counters; i++)
+            {
+                metric_index_map.emplace(ProfileEvents::getName(i), i);
+            }
+        });
+    DB::CurrentThread::finalizePerformanceCounters();
+    Poco::StringTokenizer events(metrics, ",");
+    for (const auto & event : events)
+    {
+        auto & count = DB::CurrentThread::getProfileEvents()[metric_index_map[event]];
+        event_counters[event] = count;
+    }
+    for (const auto & item : query_pipeline.getProcessors())
+    {
+//        event_counters[item->getName() + "_input_wait"] = item->getInputWaitElapsedUs();
+        event_counters[item->getName() + "_elapsed"] = item->getElapsedUs();
+    }
+    return event_counters;
+}
+
+
+LocalExecutor::LocalExecutor(QueryContext & _query_context, ContextPtr context_) : query_context(_query_context), context(context_)
 {
 }
 }

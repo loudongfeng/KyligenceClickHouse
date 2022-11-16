@@ -19,6 +19,9 @@
 #include <Common/BlockIterator.h>
 #include <DataTypes/Serializations/ISerialization.h>
 #include <base/types.h>
+#include <Common/ProfileEvents.h>
+#include <Common/CurrentThread.h>
+#include <Common/ThreadProfileEvents.h>
 #include <Core/SortDescription.h>
 
 namespace local_engine
@@ -294,12 +297,13 @@ class LocalExecutor : public BlockIterator
 {
 public:
     LocalExecutor() = default;
-    explicit LocalExecutor(QueryContext & _query_context);
+    explicit LocalExecutor(QueryContext & _query_context, ContextPtr context);
     void execute(QueryPlanPtr query_plan);
     SparkRowInfoPtr next();
     Block * nextColumnar();
     bool hasNext();
     ~LocalExecutor();
+    std::map<String, size_t> getCurrentEventCounters();
 
     Block & getHeader();
 
@@ -307,6 +311,7 @@ private:
     QueryContext query_context;
     std::unique_ptr<SparkRowInfo> writeBlockToSparkRow(DB::Block & block);
     QueryPipeline query_pipeline;
+    ContextPtr context;
     std::unique_ptr<PullingPipelineExecutor> executor;
     Block header;
     std::unique_ptr<CHColumnToSparkRow> ch_column_to_spark_row;

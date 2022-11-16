@@ -64,4 +64,9 @@ public:
     static DB::NamesAndTypesList getSchemaFromMergeTreePart(const Path & part_path);
 };
 
+class ProfileEventsUtil
+{
+public:
+    static void logProfileEvents(std::map<String, size_t> events);
+};
 }
