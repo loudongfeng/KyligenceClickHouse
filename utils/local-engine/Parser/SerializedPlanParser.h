@@ -253,7 +253,7 @@ private:
             settings.group_by_two_level_threshold_bytes,
             settings.max_bytes_before_external_group_by,
             settings.empty_result_for_aggregation_by_empty_set,
-            context->getTemporaryVolume(),
+            context->getTempDataOnDisk(),
             settings.max_threads,
             settings.min_free_disk_space_for_temporary_data,
             true,
