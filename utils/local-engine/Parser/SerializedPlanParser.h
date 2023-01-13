@@ -140,6 +140,7 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS = {
     {"date_add", "addDays"},
     {"date_sub", "subtractDays"},
     {"datediff", "dateDiff"},
+    {"second", "toSecond"},
 
     // array functions
     {"array", "array"},
@@ -149,6 +150,9 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS = {
     // map functions
     {"map", "map"},
     {"get_map_value", "arrayElement"},
+
+    // tuple functions
+    {"get_struct_field", "tupleElement"},
 
     // table-valued generator function
     {"explode", "arrayJoin"},
@@ -183,7 +187,7 @@ public:
 
     static bool isReadRelFromJava(const substrait::ReadRel & rel);
     static DB::Block parseNameStruct(const substrait::NamedStruct & struct_);
-    static DB::DataTypePtr parseType(const substrait::Type & type);
+    static DB::DataTypePtr parseType(const substrait::Type & type, std::list<std::string> * names = nullptr);
     // This is used for construct a data type from spark type name;
     static DB::DataTypePtr parseType(const std::string & type);
 

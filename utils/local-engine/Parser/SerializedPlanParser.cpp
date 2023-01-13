@@ -1,5 +1,6 @@
 #include "SerializedPlanParser.h"
 #include <memory>
+#include <string_view>
 #include <Common/logger_useful.h>
 #include <base/Decimal.h>
 #include <AggregateFunctions/AggregateFunctionFactory.h>
@@ -43,7 +44,6 @@
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/StorageMergeTreeFactory.h>
 #include <Storages/SubstraitSource/SubstraitFileSource.h>
-#include <Common/logger_useful.h>
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/wrappers.pb.h>
 #include <Poco/StringTokenizer.h>
@@ -126,7 +126,8 @@ std::shared_ptr<DB::ActionsDAG> SerializedPlanParser::expressionsToActionsDAG(
         if (expr.has_selection())
         {
             auto position = expr.selection().direct_reference().struct_field().field();
-            const ActionsDAG::Node * field = actions_dag->tryFindInOutputs(read_schema.getByPosition(position).name);
+            auto col_name = read_schema.getByPosition(position).name;
+            const ActionsDAG::Node * field = actions_dag->tryFindInOutputs(col_name);
             if (distinct_columns.contains(field->result_name))
             {
                 auto unique_name = getUniqueName(field->result_name);
@@ -448,11 +449,17 @@ Block SerializedPlanParser::parseNameStruct(const substrait::NamedStruct & struc
 {
     ColumnsWithTypeAndName internal_cols;
     internal_cols.reserve(struct_.names_size());
+    std::list<std::string> field_names;
     for (int i = 0; i < struct_.names_size(); ++i)
     {
-        const auto & name = struct_.names(i);
+        field_names.emplace_back(struct_.names(i));
+    }
+
+    for (int i = 0; i < struct_.struct_().types_size(); ++i)
+    {
+        auto name = field_names.front();
         const auto & type = struct_.struct_().types(i);
-        auto data_type = parseType(type);
+        auto data_type = parseType(type, &field_names);
         Poco::StringTokenizer name_parts(name, "#");
         if (name_parts.count() == 4)
         {
@@ -480,9 +487,20 @@ DataTypePtr wrapNullableType(bool nullable, DataTypePtr nested_type)
         return nested_type;
 }
 
-DataTypePtr SerializedPlanParser::parseType(const substrait::Type & substrait_type)
+/**
+ * names is used to name struct type fields.
+ *
+ */
+DataTypePtr SerializedPlanParser::parseType(const substrait::Type & substrait_type, std::list<std::string> * names)
 {
     DataTypePtr ch_type;
+    std::string_view current_name;
+    if (names)
+    {
+        current_name = names->front();
+        names->pop_front();
+    }
+
     if (substrait_type.has_bool_())
     {
         ch_type = std::make_shared<DataTypeUInt8>();
@@ -559,9 +577,23 @@ DataTypePtr SerializedPlanParser::parseType(const substrait::Type & substrait_ty
     else if (substrait_type.has_struct_())
     {
         DataTypes ch_field_types(substrait_type.struct_().types().size());
+        Strings field_names;
         for (size_t i = 0; i < ch_field_types.size(); ++i)
-            ch_field_types[i] = std::move(parseType(substrait_type.struct_().types()[i]));
-        ch_type = std::make_shared<DataTypeTuple>(ch_field_types);
+        {
+            if (names)
+            {
+                field_names.push_back(names->front());
+            }
+            ch_field_types[i] = std::move(parseType(substrait_type.struct_().types()[i], names));
+        }
+        if (field_names.size())
+        {
+            ch_type = std::make_shared<DataTypeTuple>(ch_field_types, field_names);
+        }
+        else
+        {
+            ch_type = std::make_shared<DataTypeTuple>(ch_field_types);
+        }
         ch_type = wrapNullableType(substrait_type.struct_().nullability(), ch_type);
     }
     else if (substrait_type.has_list())
@@ -1076,7 +1108,7 @@ SerializedPlanParser::getFunctionName(const std::string & function_signature, co
     else if (function_name == "extract")
     {
         if (args.size() != 2)
-            throw Exception(ErrorCodes::BAD_ARGUMENTS, "extract function requires two args.");
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "extract function requires two args, function:{}", function.ShortDebugString());
 
         // Get the first arg: field
         const auto & extract_field = args.at(0);
@@ -1085,19 +1117,35 @@ SerializedPlanParser::getFunctionName(const std::string & function_signature, co
         {
             const auto & field_value = extract_field.value().literal().string();
             if (field_value == "YEAR")
-                ch_function_name = "toYear";
+                ch_function_name = "toYear";        // spark: extract(YEAR FROM) or year
+            else if (field_value == "YEAR_OF_WEEK")
+                ch_function_name = "toISOYear";     // spark: extract(YEAROFWEEK FROM)
             else if (field_value == "QUARTER")
-                ch_function_name = "toQuarter";
+                ch_function_name = "toQuarter";     // spark: extract(QUARTER FROM) or quarter
             else if (field_value == "MONTH")
-                ch_function_name = "toMonth";
+                ch_function_name = "toMonth";       // spark: extract(MONTH FROM) or month
             else if (field_value == "WEEK_OF_YEAR")
-                ch_function_name = "toISOWeek";
+                ch_function_name = "toISOWeek";     // spark: extract(WEEK FROM) or weekofyear
+            /*
+            else if (field_value == "WEEK_DAY")
+            {
+                /// spark: weekday(t) -> substrait: extract(WEEK_DAY FROM t) -> ch: WEEKDAY(t)
+                /// spark: extract(DAYOFWEEK_ISO FROM t) -> substrait: 1 + extract(WEEK_DAY FROM t) -> ch: 1 + WEEKDAY(t)
+                ch_function_name = "?";
+            }
             else if (field_value == "DAY_OF_WEEK")
-                ch_function_name = "toDayOfWeek";
+                ch_function_name = "?";             // spark: extract(DAYOFWEEK FROM) or dayofweek
+            */
+            else if (field_value == "DAY")
+                ch_function_name = "toDayOfMonth";  // spark: extract(DAY FROM) or dayofmonth
             else if (field_value == "DAY_OF_YEAR")
-                ch_function_name = "toDayOfYear";
+                ch_function_name = "toDayOfYear";   // spark: extract(DOY FROM) or dayofyear
+            else if (field_value == "HOUR")
+                ch_function_name = "toHour";        // spark: extract(HOUR FROM) or hour
+            else if (field_value == "MINUTE")
+                ch_function_name = "toMinute";      // spark: extract(MINUTE FROM) or minute
             else if (field_value == "SECOND")
-                ch_function_name = "toSecond";
+                ch_function_name = "toSecond";      // spark: extract(SECOND FROM) or secondwithfraction
             else
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "The first arg of extract function is wrong.");
         }
@@ -1445,14 +1493,19 @@ const ActionsDAG::Node * SerializedPlanParser::parseArgument(ActionsDAGPtr actio
                 args.emplace_back(node);
             }
             else
-            {
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "unsupported cast input {}", rel.cast().input().DebugString());
-            }
 
             if (ch_function_name.starts_with("toDecimal"))
             {
                 UInt32 scale = rel.cast().type().decimal().scale();
                 args.emplace_back(add_column(std::make_shared<DataTypeUInt32>(), scale));
+            }
+            else if (ch_function_name.starts_with("toDateTime64"))
+            {
+                /// In Spark: cast(xx as TIMESTAMP)
+                /// In CH: toDateTime(xx, 6)
+                /// So we must add extra argument: 6
+                args.emplace_back(add_column(std::make_shared<DataTypeUInt32>(), 6));
             }
 
             const auto * function_node = toFunctionNode(action_dag, ch_function_name, args);
@@ -1493,15 +1546,16 @@ const ActionsDAG::Node * SerializedPlanParser::parseArgument(ActionsDAGPtr actio
         }
 
         case substrait::Expression::RexTypeCase::kSingularOrList: {
-            DB::ActionsDAG::NodeRawConstPtrs args;
-            args.emplace_back(parseArgument(action_dag, rel.singular_or_list().value()));
-
-            /// options should be non-empty and literals
             const auto & options = rel.singular_or_list().options();
+            /// options is empty always return false
             if (options.empty())
-                throw Exception(ErrorCodes::LOGICAL_ERROR, "Empty SingularOrList not supported");
+                return add_column(std::make_shared<DataTypeUInt8>(), 0);
+            /// options should be literals
             if (!options[0].has_literal())
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Options of SingularOrList must have literal type");
+
+            DB::ActionsDAG::NodeRawConstPtrs args;
+            args.emplace_back(parseArgument(action_dag, rel.singular_or_list().value()));
 
             DataTypePtr elem_type;
             std::tie(elem_type, std::ignore) = parseLiteral(options[0].literal());
