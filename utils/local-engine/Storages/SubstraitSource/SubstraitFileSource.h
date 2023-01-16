@@ -11,7 +11,6 @@
 #include <Interpreters/Context_fwd.h>
 #include <Processors/Chunk.h>
 #include <Processors/Executors/PullingPipelineExecutor.h>
-#include <Processors/Sources/SourceWithProgress.h>
 #include <QueryPipeline/QueryPipeline.h>
 #include <Storages/SubstraitSource/FormatFile.h>
 #include <Storages/SubstraitSource/ReadBufferBuilder.h>

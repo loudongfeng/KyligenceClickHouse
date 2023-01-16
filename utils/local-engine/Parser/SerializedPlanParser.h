@@ -263,7 +263,7 @@ private:
             true,
             3,
             settings.max_block_size,
-            false,
+            settings.enable_software_prefetch_in_aggregation,
             false);
     }
 
