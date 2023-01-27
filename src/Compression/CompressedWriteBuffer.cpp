@@ -4,10 +4,15 @@
 #include <base/types.h>
 #include <base/unaligned.h>
 #include <base/defines.h>
+#include <Common/Stopwatch.h>
 
 #include <Compression/CompressionFactory.h>
 #include "CompressedWriteBuffer.h"
 
+namespace ProfileEvents
+{
+extern const Event ShuffleCompressTime;
+}
 
 namespace DB
 {
@@ -39,7 +44,10 @@ void CompressedWriteBuffer::nextImpl()
     {
         char * out_checksum_ptr = out.position();
         char * out_compressed_ptr = out.position() + CHECKSUM_SIZE;
+        Stopwatch time;
+        time.start();
         UInt32 compressed_size = codec->compress(working_buffer.begin(), decompressed_size, out_compressed_ptr);
+        ProfileEvents::increment(ProfileEvents::ShuffleCompressTime, time.elapsedNanoseconds());
 
         CityHash_v1_0_2::uint128 checksum = CityHash_v1_0_2::CityHash128(out_compressed_ptr, compressed_size);
         memcpy(out_checksum_ptr, reinterpret_cast<const char *>(&checksum), CHECKSUM_SIZE);
@@ -48,7 +56,10 @@ void CompressedWriteBuffer::nextImpl()
     else
     {
         compressed_buffer.resize(compressed_reserve_size);
+        Stopwatch time;
+        time.start();
         UInt32 compressed_size = codec->compress(working_buffer.begin(), decompressed_size, compressed_buffer.data());
+        ProfileEvents::increment(ProfileEvents::ShuffleCompressTime, time.elapsedNanoseconds());
 
         CityHash_v1_0_2::uint128 checksum = CityHash_v1_0_2::CityHash128(compressed_buffer.data(), compressed_size);
         out.write(reinterpret_cast<const char *>(&checksum), CHECKSUM_SIZE);

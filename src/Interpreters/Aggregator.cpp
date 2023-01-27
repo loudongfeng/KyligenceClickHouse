@@ -54,6 +54,8 @@ namespace ProfileEvents
     extern const Event OverflowThrow;
     extern const Event OverflowBreak;
     extern const Event OverflowAny;
+    extern const Event AggregateCreateStateTime;
+    extern const Event AggregateComputeStateTime;
 }
 
 namespace CurrentMetrics
@@ -1165,126 +1167,138 @@ void NO_INLINE Aggregator::executeImplBatch(
     /// - this is just a pointer, so it should not be significant,
     /// - and plus this will require other changes in the interface.
     std::unique_ptr<AggregateDataPtr[]> places(new AggregateDataPtr[row_end]);
-
-    /// For all rows.
-    for (size_t i = row_begin; i < row_end; ++i)
     {
-        AggregateDataPtr aggregate_data = nullptr;
-
-        if constexpr (!no_more_keys)
+        Stopwatch time;
+        time.start();
+        /// For all rows.
+        for (size_t i = row_begin; i < row_end; ++i)
         {
-            if constexpr (prefetch && HasPrefetchMemberFunc<decltype(method.data), KeyHolder>)
-            {
-                if (i == row_begin + prefetching.iterationsToMeasure())
-                    prefetch_look_ahead = prefetching.calcPrefetchLookAhead();
+            AggregateDataPtr aggregate_data = nullptr;
 
-                if (i + prefetch_look_ahead < row_end)
+            if constexpr (!no_more_keys)
+            {
+                if constexpr (prefetch && HasPrefetchMemberFunc<decltype(method.data), KeyHolder>)
                 {
-                    auto && key_holder = state.getKeyHolder(i + prefetch_look_ahead, *aggregates_pool);
-                    method.data.prefetch(std::move(key_holder));
+                    if (i == row_begin + prefetching.iterationsToMeasure())
+                        prefetch_look_ahead = prefetching.calcPrefetchLookAhead();
+
+                    if (i + prefetch_look_ahead < row_end)
+                    {
+                        auto && key_holder = state.getKeyHolder(i + prefetch_look_ahead, *aggregates_pool);
+                        method.data.prefetch(std::move(key_holder));
+                    }
                 }
-            }
 
-            auto emplace_result = state.emplaceKey(method.data, i, *aggregates_pool);
+                auto emplace_result = state.emplaceKey(method.data, i, *aggregates_pool);
 
-            /// If a new key is inserted, initialize the states of the aggregate functions, and possibly something related to the key.
-            if (emplace_result.isInserted())
-            {
-                /// exception-safety - if you can not allocate memory or create states, then destructors will not be called.
-                emplace_result.setMapped(nullptr);
+                /// If a new key is inserted, initialize the states of the aggregate functions, and possibly something related to the key.
+                if (emplace_result.isInserted())
+                {
+                    /// exception-safety - if you can not allocate memory or create states, then destructors will not be called.
+                    emplace_result.setMapped(nullptr);
 
-                aggregate_data = aggregates_pool->alignedAlloc(total_size_of_aggregate_states, align_aggregate_states);
+                    aggregate_data = aggregates_pool->alignedAlloc(total_size_of_aggregate_states, align_aggregate_states);
 
 #if USE_EMBEDDED_COMPILER
-                if constexpr (use_compiled_functions)
-                {
-                    const auto & compiled_aggregate_functions = compiled_aggregate_functions_holder->compiled_aggregate_functions;
-                    compiled_aggregate_functions.create_aggregate_states_function(aggregate_data);
-                    if (compiled_aggregate_functions.functions_count != aggregate_functions.size())
+                    if constexpr (use_compiled_functions)
                     {
-                        static constexpr bool skip_compiled_aggregate_functions = true;
-                        createAggregateStates<skip_compiled_aggregate_functions>(aggregate_data);
+                        const auto & compiled_aggregate_functions = compiled_aggregate_functions_holder->compiled_aggregate_functions;
+                        compiled_aggregate_functions.create_aggregate_states_function(aggregate_data);
+                        if (compiled_aggregate_functions.functions_count != aggregate_functions.size())
+                        {
+                            static constexpr bool skip_compiled_aggregate_functions = true;
+                            createAggregateStates<skip_compiled_aggregate_functions>(aggregate_data);
+                        }
+
+#    if defined(MEMORY_SANITIZER)
+
+                        /// We compile only functions that do not allocate some data in Arena. Only store necessary state in AggregateData place.
+                        for (size_t aggregate_function_index = 0; aggregate_function_index < aggregate_functions.size();
+                             ++aggregate_function_index)
+                        {
+                            if (!is_aggregate_function_compiled[aggregate_function_index])
+                                continue;
+
+                            auto aggregate_data_with_offset = aggregate_data + offsets_of_aggregate_states[aggregate_function_index];
+                            auto data_size = params.aggregates[aggregate_function_index].function->sizeOfData();
+                            __msan_unpoison(aggregate_data_with_offset, data_size);
+                        }
+#    endif
                     }
-
-#if defined(MEMORY_SANITIZER)
-
-                    /// We compile only functions that do not allocate some data in Arena. Only store necessary state in AggregateData place.
-                    for (size_t aggregate_function_index = 0; aggregate_function_index < aggregate_functions.size(); ++aggregate_function_index)
-                    {
-                        if (!is_aggregate_function_compiled[aggregate_function_index])
-                            continue;
-
-                        auto aggregate_data_with_offset = aggregate_data + offsets_of_aggregate_states[aggregate_function_index];
-                        auto data_size = params.aggregates[aggregate_function_index].function->sizeOfData();
-                        __msan_unpoison(aggregate_data_with_offset, data_size);
-                    }
+                    else
 #endif
+                    {
+                        createAggregateStates(aggregate_data);
+                    }
+
+                    emplace_result.setMapped(aggregate_data);
                 }
                 else
-#endif
-                {
-                    createAggregateStates(aggregate_data);
-                }
+                    aggregate_data = emplace_result.getMapped();
 
-                emplace_result.setMapped(aggregate_data);
+                assert(aggregate_data != nullptr);
             }
             else
-                aggregate_data = emplace_result.getMapped();
+            {
+                /// Add only if the key already exists.
+                auto find_result = state.findKey(method.data, i, *aggregates_pool);
+                if (find_result.isFound())
+                    aggregate_data = find_result.getMapped();
+                else
+                    aggregate_data = overflow_row;
+            }
 
-            assert(aggregate_data != nullptr);
+            places[i] = aggregate_data;
         }
-        else
-        {
-            /// Add only if the key already exists.
-            auto find_result = state.findKey(method.data, i, *aggregates_pool);
-            if (find_result.isFound())
-                aggregate_data = find_result.getMapped();
-            else
-                aggregate_data = overflow_row;
-        }
-
-        places[i] = aggregate_data;
+        ProfileEvents::increment(ProfileEvents::AggregateCreateStateTime, time.elapsedNanoseconds());
     }
-
-#if USE_EMBEDDED_COMPILER
-    if constexpr (use_compiled_functions)
     {
-        std::vector<ColumnData> columns_data;
-
-        for (size_t i = 0; i < aggregate_functions.size(); ++i)
-        {
-            if (!is_aggregate_function_compiled[i])
-                continue;
-
-            AggregateFunctionInstruction * inst = aggregate_instructions + i;
-            size_t arguments_size = inst->that->getArgumentTypes().size(); // NOLINT
-
-            for (size_t argument_index = 0; argument_index < arguments_size; ++argument_index)
-                columns_data.emplace_back(getColumnData(inst->batch_arguments[argument_index]));
-        }
-
-        auto add_into_aggregate_states_function = compiled_aggregate_functions_holder->compiled_aggregate_functions.add_into_aggregate_states_function;
-        add_into_aggregate_states_function(row_begin, row_end, columns_data.data(), places.get());
-    }
-#endif
-
-    /// Add values to the aggregate functions.
-    for (size_t i = 0; i < aggregate_functions.size(); ++i)
-    {
+        Stopwatch time;
+        time.start();
 #if USE_EMBEDDED_COMPILER
         if constexpr (use_compiled_functions)
-            if (is_aggregate_function_compiled[i])
-                continue;
+        {
+            std::vector<ColumnData> columns_data;
+
+            for (size_t i = 0; i < aggregate_functions.size(); ++i)
+            {
+                if (!is_aggregate_function_compiled[i])
+                    continue;
+
+                AggregateFunctionInstruction * inst = aggregate_instructions + i;
+                size_t arguments_size = inst->that->getArgumentTypes().size(); // NOLINT
+
+                for (size_t argument_index = 0; argument_index < arguments_size; ++argument_index)
+                    columns_data.emplace_back(getColumnData(inst->batch_arguments[argument_index]));
+            }
+
+            auto add_into_aggregate_states_function
+                = compiled_aggregate_functions_holder->compiled_aggregate_functions.add_into_aggregate_states_function;
+            add_into_aggregate_states_function(row_begin, row_end, columns_data.data(), places.get());
+        }
 #endif
 
-        AggregateFunctionInstruction * inst = aggregate_instructions + i;
+        /// Add values to the aggregate functions.
+        for (size_t i = 0; i < aggregate_functions.size(); ++i)
+        {
+#if USE_EMBEDDED_COMPILER
+            if constexpr (use_compiled_functions)
+                if (is_aggregate_function_compiled[i])
+                    continue;
+#endif
 
-        if (inst->offsets)
-            inst->batch_that->addBatchArray(row_begin, row_end, places.get(), inst->state_offset, inst->batch_arguments, inst->offsets, aggregates_pool);
-        else if (inst->has_sparse_arguments)
-            inst->batch_that->addBatchSparse(row_begin, row_end, places.get(), inst->state_offset, inst->batch_arguments, aggregates_pool);
-        else
-            inst->batch_that->addBatch(row_begin, row_end, places.get(), inst->state_offset, inst->batch_arguments, aggregates_pool);
+            AggregateFunctionInstruction * inst = aggregate_instructions + i;
+
+            if (inst->offsets)
+                inst->batch_that->addBatchArray(
+                    row_begin, row_end, places.get(), inst->state_offset, inst->batch_arguments, inst->offsets, aggregates_pool);
+            else if (inst->has_sparse_arguments)
+                inst->batch_that->addBatchSparse(
+                    row_begin, row_end, places.get(), inst->state_offset, inst->batch_arguments, aggregates_pool);
+            else
+                inst->batch_that->addBatch(row_begin, row_end, places.get(), inst->state_offset, inst->batch_arguments, aggregates_pool);
+        }
+        ProfileEvents::increment(ProfileEvents::AggregateComputeStateTime, time.elapsedNanoseconds());
     }
 }
 
