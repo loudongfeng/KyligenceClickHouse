@@ -154,6 +154,15 @@ StringRef ColumnNullable::serializeValueIntoArena(size_t n, Arena & arena, char 
         memcpy(pos + s + sizeof(string_size), data.data, string_size);
         return StringRef(pos, s + sizeof(size_t) + string_size);
     }
+    else if (const ColumnInt64 * int64_col = checkAndGetColumn<ColumnInt64>(getNestedColumn()))
+    {
+        auto data = int64_col->getDataAt(n);
+        auto size = int64_col->sizeOfValueIfFixed();
+        pos = arena.allocContinue(s + size, begin);
+        memcpy(pos, &arr[n], s);
+        memcpy(pos + s, data.data, size);
+        return StringRef(pos, s + size);
+    }
     else
     {
         pos = arena.allocContinue(s, begin);
