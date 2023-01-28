@@ -454,6 +454,9 @@ The server successfully detected this situation and will download merged part fr
     M(ShuffleScatterTime,"")\
     M(ShuffleSpillWriteTime,"")\
     M(ShuffleCompressTime,"")\
+    \
+    M(FilterExpressionTime,"")\
+    M(FilterFilteringTime,"")\
 
 
 namespace ProfileEvents

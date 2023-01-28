@@ -4,6 +4,12 @@
 #include <Columns/ColumnsCommon.h>
 #include <Core/Field.h>
 
+namespace ProfileEvents
+{
+extern const Event FilterExpressionTime;
+extern const Event FilterFilteringTime;
+}
+
 namespace DB
 {
 
@@ -115,6 +121,8 @@ void FilterTransform::doTransform(Chunk & chunk)
     auto columns = chunk.detachColumns();
 
     {
+        Stopwatch time;
+        time.start();
         Block block = getInputPort().getHeader().cloneWithColumns(columns);
         columns.clear();
 
@@ -122,6 +130,7 @@ void FilterTransform::doTransform(Chunk & chunk)
             expression->execute(block, num_rows_before_filtration);
 
         columns = block.getColumns();
+        ProfileEvents::increment(ProfileEvents::FilterExpressionTime, time.elapsedNanoseconds());
     }
 
     if (constant_filter_description.always_true || on_totals)
@@ -164,7 +173,8 @@ void FilterTransform::doTransform(Chunk & chunk)
             break;
         }
     }
-
+    Stopwatch time;
+    time.start();
     std::unique_ptr<IFilterDescription> filter_description;
     if (filter_column->isSparse())
         filter_description = std::make_unique<SparseFilterDescription>(*filter_column);
@@ -226,7 +236,7 @@ void FilterTransform::doTransform(Chunk & chunk)
         else
             current_column = filter_description->filter(*current_column, num_filtered_rows);
     }
-
+    ProfileEvents::increment(ProfileEvents::FilterFilteringTime, time.elapsedNanoseconds());
     chunk.setColumns(std::move(columns), num_filtered_rows);
     removeFilterIfNeed(chunk);
 }
