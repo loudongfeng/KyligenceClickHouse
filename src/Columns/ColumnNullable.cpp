@@ -143,8 +143,21 @@ StringRef ColumnNullable::serializeValueIntoArena(size_t n, Arena & arena, char 
 {
     const auto & arr = getNullMapData();
     static constexpr auto s = sizeof(arr[0]);
-
-    auto * pos = arena.allocContinue(s, begin);
+    char * pos;
+    if (const ColumnString * string_col = checkAndGetColumn<ColumnString>(getNestedColumn()))
+    {
+        auto data = string_col->getDataAt(n);
+        size_t string_size = data.size + 1;
+        pos = arena.allocContinue(s + sizeof(string_size) + string_size, begin);
+        memcpy(pos, &arr[n], s);
+        memcpy(pos + s, &string_size, sizeof(string_size));
+        memcpy(pos + s + sizeof(string_size), data.data, string_size);
+        return StringRef(pos, s + sizeof(size_t) + string_size);
+    }
+    else
+    {
+        pos = arena.allocContinue(s, begin);
+    }
     memcpy(pos, &arr[n], s);
 
     if (arr[n])
