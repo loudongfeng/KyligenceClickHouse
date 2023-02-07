@@ -142,26 +142,35 @@ void ColumnNullable::insertData(const char * pos, size_t length)
 StringRef ColumnNullable::serializeValueIntoArena(size_t n, Arena & arena, char const *& begin) const
 {
     const auto & arr = getNullMapData();
+    const bool is_null = arr[n];
     static constexpr auto s = sizeof(arr[0]);
     char * pos;
     if (const ColumnString * string_col = checkAndGetColumn<ColumnString>(getNestedColumn()))
     {
         auto data = string_col->getDataAt(n);
         size_t string_size = data.size + 1;
-        pos = arena.allocContinue(s + sizeof(string_size) + string_size, begin);
+        auto memory_size = is_null ? s : s + sizeof(string_size) + string_size;
+        pos = arena.allocContinue(memory_size, begin);
         memcpy(pos, &arr[n], s);
-        memcpy(pos + s, &string_size, sizeof(string_size));
-        memcpy(pos + s + sizeof(string_size), data.data, string_size);
-        return StringRef(pos, s + sizeof(size_t) + string_size);
+        if (!is_null)
+        {
+            memcpy(pos + s, &string_size, sizeof(string_size));
+            memcpy(pos + s + sizeof(string_size), data.data, string_size);
+        }
+        return StringRef(pos, memory_size);
     }
     else if (const ColumnInt64 * int64_col = checkAndGetColumn<ColumnInt64>(getNestedColumn()))
     {
         auto data = int64_col->getDataAt(n);
         auto size = int64_col->sizeOfValueIfFixed();
-        pos = arena.allocContinue(s + size, begin);
+        auto memory_size = is_null ? s : s + size;
+        pos = arena.allocContinue(memory_size, begin);
         memcpy(pos, &arr[n], s);
-        memcpy(pos + s, data.data, size);
-        return StringRef(pos, s + size);
+        if (!is_null)
+        {
+            memcpy(pos + s, data.data, size);
+        }
+        return StringRef(pos, memory_size);
     }
     else
     {
