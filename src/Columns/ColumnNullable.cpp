@@ -216,11 +216,17 @@ const char * ColumnNullable::skipSerializedInArena(const char * pos) const
 void ColumnNullable::insertRangeFrom(const IColumn & src, size_t start, size_t length)
 {
     const ColumnNullable & nullable_col = assert_cast<const ColumnNullable &>(src);
-    getNullMapColumn().insertRangeFrom(*nullable_col.null_map, start, length);
-    getNestedColumn().insertRangeFrom(*nullable_col.nested_column, start, length);
-    const auto& src_null_map_data = nullable_col.getNullMapData();
-    has_null = hasNull();
-    has_null |= contain_byte(src_null_map_data.data() + start, length, 1);
+    if (!nullable_col.hasNull())
+    {
+        insertRangeFromNotNullable(nullable_col.getNestedColumn(), start, length);
+    }
+    else
+    {
+        getNullMapColumn().insertRangeFrom(*nullable_col.null_map, start, length);
+        getNestedColumn().insertRangeFrom(*nullable_col.nested_column, start, length);
+        has_null = hasNull();
+        has_null |= nullable_col.hasNull();
+    }
 }
 
 void ColumnNullable::insert(const Field & x)
@@ -241,10 +247,16 @@ void ColumnNullable::insert(const Field & x)
 void ColumnNullable::insertFrom(const IColumn & src, size_t n)
 {
     const ColumnNullable & src_concrete = assert_cast<const ColumnNullable &>(src);
-    getNestedColumn().insertFrom(src_concrete.getNestedColumn(), n);
-    auto is_null = src_concrete.getNullMapData()[n];
-    has_null |= is_null;
-    getNullMapData().push_back(is_null);
+    if (!src_concrete.hasNull()) {
+        insertFromNotNullable(src_concrete.getNestedColumn(), n);
+    }
+    else
+    {
+        getNestedColumn().insertFrom(src_concrete.getNestedColumn(), n);
+        auto is_null = src_concrete.getNullMapData()[n];
+        has_null |= is_null;
+        getNullMapData().push_back(is_null);
+    }
 }
 
 void ColumnNullable::insertFromNotNullable(const IColumn & src, size_t n)
