@@ -13,11 +13,20 @@
 #include <Interpreters/ExpressionActions.h>
 namespace local_engine
 {
+
+struct PartitionInfo
+{
+    DB::IColumn::Selector partition_selector;
+    std::vector<size_t> partition_start_points;
+
+    static PartitionInfo fromSelector(DB::IColumn::Selector selector, size_t partition_num);
+};
+
 class RoundRobinSelectorBuilder
 {
 public:
     explicit RoundRobinSelectorBuilder(size_t parts_num_) : parts_num(parts_num_) {}
-    std::vector<DB::IColumn::ColumnIndex> build(DB::Block & block);
+    PartitionInfo build(DB::Block & block);
 private:
     size_t parts_num;
     Int32 pid_selection = 0;
@@ -27,7 +36,7 @@ class HashSelectorBuilder
 {
 public:
     explicit HashSelectorBuilder(UInt32 parts_num_, const std::vector<std::string> & exprs_, const std::string & hash_function_name_);
-    std::vector<DB::IColumn::ColumnIndex> build(DB::Block & block);
+    PartitionInfo build(DB::Block & block);
 private:
     UInt32 parts_num;
     std::vector<std::string> exprs;
@@ -39,7 +48,7 @@ class RangeSelectorBuilder
 {
 public:
     explicit RangeSelectorBuilder(const std::string & options_);
-    std::vector<DB::IColumn::ColumnIndex> build(DB::Block & block);
+    PartitionInfo build(DB::Block & block);
 private:
     DB::SortDescription sort_descriptions;
     std::vector<size_t> sorting_key_columns;
@@ -61,7 +70,7 @@ private:
     void initRangeBlock(Poco::JSON::Array::Ptr range_bounds);
     void initActionsDAG(const DB::Block & block);
 
-    void computePartitionIdByBinarySearch(DB::Block & block, std::vector<DB::IColumn::ColumnIndex> & selector);
+    void computePartitionIdByBinarySearch(DB::Block & block, DB::IColumn::Selector & selector);
     int compareRow(
         const DB::Columns & columns,
         const std::vector<size_t> & required_columns,
