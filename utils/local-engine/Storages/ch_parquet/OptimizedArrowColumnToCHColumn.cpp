@@ -628,7 +628,17 @@ void OptimizedArrowColumnToCHColumn::arrowColumnsToCHChunk(
         }
         try
         {
-            column.column = castColumn(column, header_column.type);
+            if (!column.type->isNullable() && header_column.type->isNullable() &&
+                column.type->equals(*typeid_cast<const DataTypeNullable *>(header_column.type.get())->getNestedType())) {
+
+                auto nullmap_column = ColumnUInt8::create();
+                nullmap_column->insertManyDefaults(column.column->size());
+
+                auto nullable_type = std::make_shared<DataTypeNullable>(column.type);
+                column.column = ColumnNullable::create(column.column, std::move(nullmap_column));
+            } else {
+                column.column = castColumn(column, header_column.type);
+            }
         }
         catch (Exception & e)
         {
