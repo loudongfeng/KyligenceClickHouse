@@ -10,7 +10,7 @@
 #include <Processors/IProcessor.h>
 #include <QueryPipeline/Pipe.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
-#include <base/logger_useful.h>
+#include <Common/logger_useful.h>
 #include <Poco/Logger.h>
 
 namespace local_engine
@@ -81,6 +81,11 @@ DB::Block ExpandStep::buildOutputHeader(
     auto grouping_id_type = std::make_shared<DB::DataTypeInt64>();
     cols.emplace_back(DB::ColumnWithTypeAndName(std::move(grouping_id_col), grouping_id_type, grouping_id_name_));
     return DB::Block(cols);
+}
+
+void ExpandStep::updateOutputStream()
+{
+    createOutputStream(input_streams.front(), output_header, getDataStreamTraits());
 }
 
 void ExpandStep::transformPipeline(DB::QueryPipelineBuilder & pipeline, const DB::BuildQueryPipelineSettings & /*settings*/)

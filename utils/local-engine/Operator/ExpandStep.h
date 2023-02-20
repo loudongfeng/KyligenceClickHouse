@@ -29,6 +29,8 @@ private:
     DB::Block output_header;
     DB::Processors processors;
 
+    void updateOutputStream() override;
+
     static DB::Block buildOutputHeader(
         const DB::Block & header,
         const std::vector<size_t> & aggregating_expressions_columns_,
