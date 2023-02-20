@@ -56,8 +56,12 @@ PartitionInfo RoundRobinSelectorBuilder::build(DB::Block & block)
     return PartitionInfo::fromSelector(std::move(result), parts_num);
 }
 
-HashSelectorBuilder::HashSelectorBuilder(UInt32 parts_num_, const std::vector<std::string> & exprs_, const std::string & hash_function_name_)
-    : parts_num(parts_num_), exprs(exprs_), hash_function_name(hash_function_name_)
+HashSelectorBuilder::HashSelectorBuilder(
+    UInt32 parts_num_,
+    const std::vector<std::string> & exprs_,
+    const std::vector<std::size_t> & exprs_index_,
+    const std::string & hash_function_name_)
+    : parts_num(parts_num_), exprs(exprs_), exprs_index(exprs_index_), hash_function_name(hash_function_name_)
 {
 }
 
@@ -65,9 +69,18 @@ PartitionInfo HashSelectorBuilder::build(DB::Block & block)
 {
     ColumnsWithTypeAndName args;
     auto rows = block.rows();
-    for (auto & name : exprs)
+    for (size_t i = 0; i < exprs.size(); i++)
     {
-        args.emplace_back(block.getByName(name));
+        auto & name = exprs.at(i);
+        auto * type_and_name = block.findByName(name);
+        if (type_and_name == nullptr)
+        {
+            args.emplace_back(block.getByPosition(exprs_index.at(i)));
+        }
+        else
+        {
+            args.emplace_back(block.getByName(name));
+        }
     }
 
     if (!hash_function) [[unlikely]]
