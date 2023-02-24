@@ -211,48 +211,35 @@ struct TernaryValueBuilderImpl<Type, Types...>
         }
         else if (const auto * nullable_column = typeid_cast<const ColumnNullable *>(x))
         {
-            auto has_null = nullable_column->hasNull();
             if (const auto * nested_column = typeid_cast<const ColumnVector<Type> *>(nullable_column->getNestedColumnPtr().get()))
             {
-                if (!has_null)
-                {
-                    auto &column_data = nested_column->getData();
+                const auto& null_data = nullable_column->getNullMapData();
+                const auto& column_data = nested_column->getData();
 
+                if constexpr (sizeof(Type) == 1)
+                {
                     for (size_t i = 0; i < size; ++i)
                     {
-                        ternary_column_data[i] = (column_data[i] != 0) << 1;
+                        auto has_value = static_cast<UInt8>(column_data[i] != 0);
+                        auto is_null = !!null_data[i];
+
+                        ternary_column_data[i] = ((has_value << 1) | is_null) & (1 << !is_null);
                     }
                 }
                 else
                 {
-                    const auto& null_data = nullable_column->getNullMapData();
-                    const auto& column_data = nested_column->getData();
-
-                    if constexpr (sizeof(Type) == 1)
+                    for (size_t i = 0; i < size; ++i)
                     {
-                        for (size_t i = 0; i < size; ++i)
-                        {
-                            auto has_value = static_cast<UInt8>(column_data[i] != 0);
-                            auto is_null = !!null_data[i];
-
-                            ternary_column_data[i] = ((has_value << 1) | is_null) & (1 << !is_null);
-                        }
+                        auto has_value = static_cast<UInt8>(column_data[i] != 0);
+                        ternary_column_data[i] = has_value;
                     }
-                    else
+
+                    for (size_t i = 0; i < size; ++i)
                     {
-                        for (size_t i = 0; i < size; ++i)
-                        {
-                            auto has_value = static_cast<UInt8>(column_data[i] != 0);
-                            ternary_column_data[i] = has_value;
-                        }
+                        auto has_value = ternary_column_data[i];
+                        auto is_null = !!null_data[i];
 
-                        for (size_t i = 0; i < size; ++i)
-                        {
-                            auto has_value = ternary_column_data[i];
-                            auto is_null = !!null_data[i];
-
-                            ternary_column_data[i] = ((has_value << 1) | is_null) & (1 << !is_null);
-                        }
+                        ternary_column_data[i] = ((has_value << 1) | is_null) & (1 << !is_null);
                     }
                 }
             }

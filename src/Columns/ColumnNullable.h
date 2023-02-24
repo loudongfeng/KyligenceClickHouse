@@ -3,6 +3,7 @@
 #include <Columns/IColumn.h>
 #include <Columns/IColumnImpl.h>
 #include <Columns/ColumnsNumber.h>
+#include <Columns/ColumnsCommon.h>
 #include <Common/typeid_cast.h>
 #include <Common/assert_cast.h>
 
@@ -78,7 +79,6 @@ public:
     {
         getNestedColumn().insertDefault();
         getNullMapData().push_back(1);
-        has_null = true;
     }
 
     void popBack(size_t n) override;
@@ -185,12 +185,10 @@ public:
     /// Return the column that represents the byte map.
     const ColumnPtr & getNullMapColumnPtr() const { return null_map; }
     ColumnPtr & getNullMapColumnPtr() {
-        need_update_has_null = true;
         return null_map;
     }
 
     ColumnUInt8 & getNullMapColumn() {
-        need_update_has_null = true;
         return assert_cast<ColumnUInt8 &>(*null_map);
     }
     const ColumnUInt8 & getNullMapColumn() const { return assert_cast<const ColumnUInt8 &>(*null_map); }
@@ -212,19 +210,12 @@ public:
     /// Check that size of null map equals to size of nested column.
     void checkConsistency() const;
     bool hasNull() const {
-        if (unlikely(need_update_has_null)) {
-            const_cast<ColumnNullable*>(this)->updateHasNull();
-        }
-        return has_null;
+        return !memoryIsZero(null_map.get()->getRawData().data(), 0, null_map->size());
     }
 
 private:
     WrappedPtr nested_column;
     WrappedPtr null_map;
-    bool need_update_has_null = true;
-    bool has_null;
-
-    void updateHasNull();
 
     template <bool negative>
     void applyNullMapImpl(const NullMap & map);
