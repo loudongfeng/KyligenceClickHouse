@@ -82,6 +82,8 @@ void BroadCastJoinBuilder::buildJoinIfNotExist(
     else
     {
         GET_JNIENV(env)
+        // it needs to delete global ref of the input object, otherwise it will hold the input object
+        // and lead to memory leak.
         env->DeleteGlobalRef(input);
         CLEAN_JNIENV
     }

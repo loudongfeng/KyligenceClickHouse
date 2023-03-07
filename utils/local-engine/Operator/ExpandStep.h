@@ -27,7 +27,8 @@ private:
     std::string grouping_id_name;
     DB::Block header;
     DB::Block output_header;
-    DB::Processors processors;
+
+    void updateOutputStream() override;
 
     void updateOutputStream() override;
 

@@ -50,6 +50,7 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS = {
     {"quarter", "toQuarter"},
     {"to_unix_timestamp", "toUnixTimestamp"},
     {"unix_timestamp", "toUnixTimestamp"},
+    {"date_format", "formatDateTimeInJodaSyntax"},
 
     /// arithmetic functions
     {"subtract", "minus"},
@@ -110,9 +111,9 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS = {
     {"substring", "substring"},
     {"lower", "lower"},
     {"upper", "upper"},
-    {"trim", "trimBoth"},
-    {"ltrim", "trimLeft"},
-    {"rtrim", "trimRight"},
+    {"trim", ""},
+    {"ltrim", ""},
+    {"rtrim", ""},
     {"concat", "concat"},
     {"strpos", "position"},
     {"char_length", "char_length"},
@@ -130,6 +131,12 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS = {
     {"reverse","reverseUTF8"},
     // {"hash","murmurHash3_32"},
     {"md5","MD5"},
+    {"translate", "translateUTF8"},
+    {"repeat","repeat"},
+
+    /// hash functions
+    {"hash", "murmurHashSpark3_32"},
+    {"xxhash64", "xxHashSpark64"},
 
     // in functions
     {"in", "in"},
@@ -146,11 +153,13 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS = {
     {"collect_list", "groupArray"},
 
     // date or datetime functions
-    {"from_unixtime", "FROM_UNIXTIME"},
+    {"from_unixtime", "fromUnixTimestampInJodaSyntax"},
     {"date_add", "addDays"},
     {"date_sub", "subtractDays"},
     {"datediff", "dateDiff"},
     {"second", "toSecond"},
+    {"add_months", "addMonths"},
+    {"trunc", ""},  /// dummy mapping
 
     // array functions
     {"array", "array"},
@@ -240,9 +249,22 @@ private:
         std::vector<String> & required_columns,
         DB::ActionsDAGPtr actions_dag = nullptr,
         bool keep_result = false);
+    DB::ActionsDAGPtr parseArrayJoin(
+        const Block & input,
+        const substrait::Expression & rel,
+        std::vector<String> & result_names,
+        std::vector<String> & required_columns,
+        DB::ActionsDAGPtr actions_dag = nullptr,
+        bool keep_result = false);
     const ActionsDAG::Node * parseFunctionWithDAG(
         const substrait::Expression & rel,
         std::string & result_name,
+        std::vector<String> & required_columns,
+        DB::ActionsDAGPtr actions_dag = nullptr,
+        bool keep_result = false);
+    ActionsDAG::NodeRawConstPtrs parseArrayJoinWithDAG(
+        const substrait::Expression & rel,
+        std::vector<String> & result_name,
         std::vector<String> & required_columns,
         DB::ActionsDAGPtr actions_dag = nullptr,
         bool keep_result = false);
@@ -313,7 +335,7 @@ private:
 
     void addRemoveNullableStep(QueryPlan & plan, std::vector<String> columns);
 
-    std::pair<DB::DataTypePtr, DB::Field> convertStructFieldType(const DB::DataTypePtr & type, const DB::Field & field);
+    static std::pair<DB::DataTypePtr, DB::Field> convertStructFieldType(const DB::DataTypePtr & type, const DB::Field & field);
 
     int name_no = 0;
     std::unordered_map<std::string, std::string> function_mapping;
