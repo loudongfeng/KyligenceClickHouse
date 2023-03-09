@@ -30,8 +30,6 @@ private:
 
     void updateOutputStream() override;
 
-    void updateOutputStream() override;
-
     static DB::Block buildOutputHeader(
         const DB::Block & header,
         const std::vector<size_t> & aggregating_expressions_columns_,

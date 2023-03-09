@@ -110,9 +110,5 @@ void ExpandStep::describePipeline(DB::IQueryPlanStep::FormatSettings & settings)
     if (!processors.empty())
         DB::IQueryPlanStep::describePipeline(processors, settings);
 }
-void ExpandStep::updateOutputStream()
-{
-    createOutputStream(input_streams.front(), output_header, getDataStreamTraits());
-}
 
 }
