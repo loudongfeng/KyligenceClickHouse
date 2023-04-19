@@ -35,6 +35,9 @@ namespace ErrorCodes
 /// A left-closed and right-open interval representing the preimage of a function.
 using RangeOrNull = std::optional<std::pair<Field, Field>>;
 
+class IFunctionOverloadResolver;
+using FunctionOverloadResolverPtr = std::shared_ptr<IFunctionOverloadResolver>;
+
 /// The simplest executable object.
 /// Motivation:
 ///  * Prepare something heavy once before main execution loop instead of doing it for each columns.
@@ -50,6 +53,8 @@ public:
     virtual String getName() const = 0;
 
     ColumnPtr execute(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t input_rows_count, bool dry_run) const;
+
+    void setResolver(const FunctionOverloadResolverPtr & resolver_) { resolver = resolver_; }
 
 protected:
 
@@ -101,6 +106,8 @@ protected:
       * Counterexample: modulo(0, 0)
       */
     virtual bool canBeExecutedOnDefaultArguments() const { return true; }
+
+    FunctionOverloadResolverPtr resolver;
 
 private:
 
@@ -411,7 +418,6 @@ private:
     DataTypePtr getReturnTypeWithoutLowCardinality(const ColumnsWithTypeAndName & arguments) const;
 };
 
-using FunctionOverloadResolverPtr = std::shared_ptr<IFunctionOverloadResolver>;
 
 /// Old function interface. Check documentation in IFunction.h.
 /// If client do not need stateful properties it can implement this interface.
