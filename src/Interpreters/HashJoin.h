@@ -10,6 +10,7 @@
 #include <Interpreters/IJoin.h>
 #include <Interpreters/AggregationCommon.h>
 #include <Interpreters/RowRefs.h>
+#include <Interpreters/JoinUtils.h>
 
 #include <Common/Arena.h>
 #include <Common/ColumnsHashing.h>
@@ -165,6 +166,8 @@ public:
       * Could be called from different threads in parallel.
       */
     void joinBlock(Block & block, ExtraBlockPtr & not_processed) override;
+
+    IBlocksStreamPtr joinBlockWithStreamOutput(Block & block, std::shared_ptr<ExtraBlock> & not_processed) override;
 
     /// Check joinGet arguments and infer the return type.
     DataTypePtr joinGetCheckAndGetReturnType(const DataTypes & data_types, const String & column_name, bool or_null) const;
@@ -393,6 +396,10 @@ public:
 
     void debugKeys() const;
 
+    void shrinkStoredBlocksToFit(size_t & total_bytes_in_join);
+
+    bool supportStreamJoin() const override;
+
 private:
     template<bool> friend class NotJoinedHash;
 
@@ -430,6 +437,12 @@ private:
     /// Left table column names that are sources for required_right_keys columns
     std::vector<String> required_right_keys_sources;
 
+    /// When tracked memory consumption is more than a threshold, we will shrink to fit stored blocks.
+    bool shrink_blocks = false;
+    Int64 memory_usage_before_adding_blocks = 0;
+
+    std::shared_ptr<StreamReplicateBlocks> current_result;
+
     Poco::Logger * log;
 
     /// Should be set via setLock to protect hash table from modification from StorageJoin
@@ -441,13 +454,13 @@ private:
     void initRightBlockStructure(Block & saved_block_sample);
 
     template <JoinKind KIND, JoinStrictness STRICTNESS, typename Maps>
-    void joinBlockImpl(
+    IBlocksStreamPtr joinBlockImpl(
         Block & block,
         const Block & block_with_columns_to_add,
         const std::vector<const Maps *> & maps_,
-        bool is_join_get = false) const;
+        bool is_join_get = false);
 
-    void joinBlockImplCross(Block & block, ExtraBlockPtr & not_processed) const;
+    IBlocksStreamPtr joinBlockImplCross(Block & block, ExtraBlockPtr & not_processed);
 
     static Type chooseMethod(JoinKind kind, const ColumnRawPtrs & key_columns, Sizes & key_sizes);
 

@@ -425,16 +425,15 @@ void GraceHashJoin::initialize(const Block & sample_block)
     left_sample_block = sample_block.cloneEmpty();
     output_sample_block = left_sample_block.cloneEmpty();
     ExtraBlockPtr not_processed;
-    hash_join->joinBlock(output_sample_block, not_processed);
+    hash_join->joinBlockWithStreamOutput(output_sample_block, not_processed);
     initBuckets();
 }
 
-void GraceHashJoin::joinBlock(Block & block, std::shared_ptr<ExtraBlock> & not_processed)
+IBlocksStreamPtr GraceHashJoin::joinBlockWithStreamOutput(Block & block, std::shared_ptr<ExtraBlock> & not_processed)
 {
     if (block.rows() == 0)
     {
-        hash_join->joinBlock(block, not_processed);
-        return;
+        return hash_join->joinBlockWithStreamOutput(block, not_processed);
     }
 
     materializeBlockInplace(block);
@@ -446,11 +445,12 @@ void GraceHashJoin::joinBlock(Block & block, std::shared_ptr<ExtraBlock> & not_p
 
     block = std::move(blocks[current_bucket->idx]);
 
-    hash_join->joinBlock(block, not_processed);
+    auto stream_output = hash_join->joinBlockWithStreamOutput(block, not_processed);
     if (not_processed)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Unhandled not processed block in GraceHashJoin");
 
     flushBlocksToBuckets<JoinTableSide::Left>(blocks, buckets);
+    return stream_output;
 }
 
 void GraceHashJoin::setTotals(const Block & block)
@@ -528,6 +528,15 @@ public:
 
     Block nextImpl() override
     {
+        {
+            std::lock_guard lock(remaining_blocks_mutex);
+            if (!remaining_blocks.empty())
+            {
+                    auto res = remaining_blocks.front();
+                    remaining_blocks.pop();
+                    return res;
+            }
+        }
         Block block;
         size_t num_buckets = buckets.size();
         size_t current_idx = buckets[current_bucket]->idx;
@@ -538,9 +547,7 @@ public:
             // There is a lock inside left_reader.read() .
             block = left_reader.read();
             if (!block)
-            {
                 return {};
-            }
 
             // block comes from left_reader, need to join with right table to get the result.
             Blocks blocks = JoinCommon::scatterBlockByHash(left_key_names, block, num_buckets);
@@ -566,12 +573,23 @@ public:
         } while (block.rows() == 0);
 
         ExtraBlockPtr not_processed;
-        hash_join->joinBlock(block, not_processed);
+        auto stream_output = hash_join->joinBlockWithStreamOutput(block, not_processed);
 
         if (not_processed)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "Unsupported hash join type");
-
-        return block;
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Unsupported hash join type");
+        std::vector<Block> blocks;
+        while (!stream_output->isFinished())
+        {
+            blocks.push_back(stream_output->next());
+        }
+        std::lock_guard lock(remaining_blocks_mutex);
+        for (const auto & item : blocks)
+        {
+            remaining_blocks.push(item);
+        }
+        auto res = remaining_blocks.front();
+        remaining_blocks.pop();
+        return res;
     }
 
     size_t current_bucket;
@@ -579,6 +597,8 @@ public:
     InMemoryJoinPtr hash_join;
 
     AccumulatedBlockReader left_reader;
+    std::queue<Block> remaining_blocks;
+    std::mutex remaining_blocks_mutex;
 
     Names left_key_names;
     Names right_key_names;

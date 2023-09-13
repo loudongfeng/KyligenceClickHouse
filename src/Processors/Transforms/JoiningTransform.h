@@ -84,8 +84,10 @@ private:
     FinishCounterPtr finish_counter;
     IBlocksStreamPtr non_joined_blocks;
     size_t max_block_size;
+    IBlocksStreamPtr blocks;
 
     Block readExecute(Chunk & chunk);
+    void joinBlock(Block & block, std::shared_ptr<ExtraBlock> & not_processed_block);
 };
 
 /// Fills Join with block from right table.

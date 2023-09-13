@@ -908,7 +908,7 @@ struct JoinOnKeyColumns
 
     bool isRowFiltered(size_t i) const { return join_mask_column.isRowFiltered(i); }
 };
-
+template<bool is_any_join>
 class AddedColumns
 {
 public:
@@ -940,7 +940,7 @@ public:
         size_t num_columns_to_add = block_with_columns_to_add.columns();
         if (is_asof_join)
             ++num_columns_to_add;
-
+        has_columns_to_add = num_columns_to_add > 0;
         columns.reserve(num_columns_to_add);
         type_name.reserve(num_columns_to_add);
         right_indexes.reserve(num_columns_to_add);
@@ -969,9 +969,11 @@ public:
 
     size_t size() const { return columns.size(); }
 
-    ColumnWithTypeAndName moveColumn(size_t i)
+    size_t lazyRowSize() const { return lazy_right_rows.size(); }
+
+    ColumnWithTypeAndName getEmptyColumn(size_t i)
     {
-        return ColumnWithTypeAndName(std::move(columns[i]), type_name[i].type, type_name[i].qualified_name);
+        return ColumnWithTypeAndName(columns[i]->cloneEmpty(), type_name[i].type, type_name[i].qualified_name);
     }
 
     static void assertBlockEqualsStructureUpToLowCard(const Block & lhs_block, const Block & rhs_block)
@@ -1005,58 +1007,127 @@ public:
     template <bool has_defaults>
     void appendFromBlock(const Block & block, size_t row_num)
     {
-        if constexpr (has_defaults)
-            applyLazyDefaults();
-
 #ifndef NDEBUG
         /// Like assertBlocksHaveEqualStructure but doesn't check low cardinality
         assertBlockEqualsStructureUpToLowCard(sample_block, block);
 #else
         UNUSED(assertBlockEqualsStructureUpToLowCard);
 #endif
-
-        if (is_join_get)
+        if constexpr (is_any_join)
         {
-            /// If it's joinGetOrNull, we need to wrap not-nullable columns in StorageJoin.
-            for (size_t j = 0, size = right_indexes.size(); j < size; ++j)
+            if constexpr (has_defaults)
+                applyLazyDefaults();
+            if (is_join_get)
             {
-                const auto & column_from_block = block.getByPosition(right_indexes[j]);
-                if (auto * nullable_col = typeid_cast<ColumnNullable *>(columns[j].get());
-                    nullable_col && !column_from_block.column->isNullable())
-                    nullable_col->insertFromNotNullable(*column_from_block.column, row_num);
-                else if (auto * lowcard_col = typeid_cast<ColumnLowCardinality *>(columns[j].get());
-                         lowcard_col && !typeid_cast<const ColumnLowCardinality *>(column_from_block.column.get()))
-                    lowcard_col->insertFromFullColumn(*column_from_block.column, row_num);
-                else
-                    columns[j]->insertFrom(*column_from_block.column, row_num);
+                /// If it's joinGetOrNull, we need to wrap not-nullable columns in StorageJoin.
+                for (size_t j = 0, size = right_indexes.size(); j < size; ++j)
+                {
+                    const auto & column_from_block = block.getByPosition(right_indexes[j]);
+                    if (auto * nullable_col = typeid_cast<ColumnNullable *>(columns[j].get());
+                        nullable_col && !column_from_block.column->isNullable())
+                        nullable_col->insertFromNotNullable(*column_from_block.column, row_num);
+                    else if (auto * lowcard_col = typeid_cast<ColumnLowCardinality *>(columns[j].get());
+                             lowcard_col && !typeid_cast<const ColumnLowCardinality *>(column_from_block.column.get()))
+                        lowcard_col->insertFromFullColumn(*column_from_block.column, row_num);
+                    else
+                        columns[j]->insertFrom(*column_from_block.column, row_num);
+                }
+            }
+            else
+            {
+                for (size_t j = 0, size = right_indexes.size(); j < size; ++j)
+                {
+                    const auto & column_from_block = block.getByPosition(right_indexes[j]);
+                    if (auto * lowcard_col = typeid_cast<ColumnLowCardinality *>(columns[j].get());
+                        lowcard_col && !typeid_cast<const ColumnLowCardinality *>(column_from_block.column.get()))
+                        lowcard_col->insertFromFullColumn(*column_from_block.column, row_num);
+                    else
+                        columns[j]->insertFrom(*column_from_block.column, row_num);
+                }
             }
         }
         else
         {
-            for (size_t j = 0, size = right_indexes.size(); j < size; ++j)
+            if (has_columns_to_add)
+                lazy_right_rows.emplace_back(RowRef(&block, row_num));
+        }
+    }
+
+    ColumnsWithTypeAndName getColumns(size_t offset, size_t length)
+    {
+        if constexpr (!is_any_join)
+        {
+            ColumnsWithTypeAndName res;
+            for (size_t i = 0; i < this->size(); ++i)
             {
-                const auto & column_from_block = block.getByPosition(right_indexes[j]);
-                if (auto * lowcard_col = typeid_cast<ColumnLowCardinality *>(columns[j].get());
-                    lowcard_col && !typeid_cast<const ColumnLowCardinality *>(column_from_block.column.get()))
-                    lowcard_col->insertFromFullColumn(*column_from_block.column, row_num);
-                else
-                    columns[j]->insertFrom(*column_from_block.column, row_num);
+                MutableColumnPtr col = type_name[i].type->createColumn();
+                col->reserve(length);
+                size_t end = offset + length;
+                chassert(end <= lazy_right_rows.size());
+                for (size_t j = offset; j < end; ++j)
+                {
+                    auto row = lazy_right_rows[j];
+                    if (!row.block)
+                    {
+                        type_name[i].type->insertDefaultInto(*col);
+                        continue;
+                    }
+                    const auto & column_from_block = row.block->getByPosition(right_indexes[i]);
+                    /// If it's joinGetOrNull, we need to wrap not-nullable columns in StorageJoin.
+                    if (is_join_get)
+                    {
+                        if (auto * nullable_col = typeid_cast<ColumnNullable *>(col.get());
+                            nullable_col && !column_from_block.column->isNullable())
+                        {
+                            nullable_col->insertFromNotNullable(*column_from_block.column, row.row_num);
+                            continue;
+                        }
+                    }
+                    if (auto * lowcard_col = typeid_cast<ColumnLowCardinality *>(col.get());
+                        lowcard_col && !typeid_cast<const ColumnLowCardinality *>(column_from_block.column.get()))
+                        lowcard_col->insertFromFullColumn(*column_from_block.column, row.row_num);
+                    else
+                        col->insertFrom(*column_from_block.column, row.row_num);
+                }
+                res.emplace_back(ColumnWithTypeAndName(std::move(col), type_name[i].type, type_name[i].qualified_name));
             }
+            return res;
+        }
+        else
+        {
+            applyLazyDefaults();
+            ColumnsWithTypeAndName res;
+            for (size_t i = 0; i < this->size(); ++i)
+            {
+                res.emplace_back(ColumnWithTypeAndName(std::move(columns[i]), type_name[i].type, type_name[i].qualified_name));
+            }
+            return res;
         }
     }
 
     void appendDefaultRow()
     {
-        ++lazy_defaults_count;
+        if constexpr (is_any_join)
+        {
+          ++lazy_defaults_count;
+        }
+        else
+        {
+            if (has_columns_to_add)
+                lazy_right_rows.emplace_back(RowRef(nullptr, 0));
+        }
     }
 
     void applyLazyDefaults()
     {
-        if (lazy_defaults_count)
+        if constexpr (is_any_join)
         {
-            for (size_t j = 0, size = right_indexes.size(); j < size; ++j)
-                JoinCommon::addDefaultValues(*columns[j], type_name[j].type, lazy_defaults_count);
-            lazy_defaults_count = 0;
+            if (lazy_defaults_count)
+            {
+                for (size_t j = 0, size = right_indexes.size(); j < size; ++j)
+                    JoinCommon::addDefaultValues(*columns[j], type_name[j].type, lazy_defaults_count);
+                lazy_defaults_count = 0;
+            }
         }
     }
 
@@ -1072,20 +1143,169 @@ private:
     std::vector<TypeAndName> type_name;
     MutableColumns columns;
     std::vector<size_t> right_indexes;
-    size_t lazy_defaults_count = 0;
     /// for ASOF
     const IColumn * left_asof_key = nullptr;
     Block sample_block;
+    // The default row is represented by an empty RowRef, so that fixed-size blocks can be generated sequentially,
+    // default_count cannot represent the position of the row
+    std::vector<RowRef> lazy_right_rows;
+    size_t lazy_defaults_count = 0;
+    bool has_columns_to_add;
 
     bool is_join_get;
 
     void addColumn(const ColumnWithTypeAndName & src_column, const std::string & qualified_name)
     {
         columns.push_back(src_column.column->cloneEmpty());
-        columns.back()->reserve(src_column.column->size());
+        if constexpr (is_any_join)
+        {
+            columns.back()->reserve(src_column.column->size());
+        }
         type_name.emplace_back(src_column.type, src_column.name, qualified_name);
     }
 };
+
+template<bool is_any_join>
+class StreamReplicateBlocks final: public IBlocksStream
+{
+public:
+    explicit StreamReplicateBlocks(const Block & block);
+    StreamReplicateBlocks(const Block & block, std::vector<size_t> right_col_idx, std::shared_ptr<AddedColumns<is_any_join>> added_columns);
+    StreamReplicateBlocks(const Block & block, std::vector<size_t> right_col_idx, std::shared_ptr<AddedColumns<is_any_join>> added_columns, std::unique_ptr<IColumn::Offsets> offsets_to_replicate, const std::vector<size_t> & need_replicate_pos, size_t max_block_size);
+
+    void disableStream() { stream = false; }
+
+protected:
+    Block nextImpl() override;
+
+private:
+    void materializeAddedColumns(size_t offset, size_t length)
+    {
+        if (added_columns)
+        {
+            if (length == 0)
+                length = added_columns->lazyRowSize();
+            auto columns = added_columns->getColumns(offset, length);
+            size_t i = 0;
+            for (const auto & idx : right_col_idx)
+            {
+                block.safeGetByPosition(idx).column = std::move(columns[i].column);
+                i++;
+            }
+        }
+    }
+
+    Block block;
+    std::vector<size_t> right_col_idx;
+    std::shared_ptr<AddedColumns<is_any_join>> added_columns;
+    std::unique_ptr<IColumn::Offsets> offsets_to_replicate;
+    std::vector<size_t> need_replicate_pos;
+    size_t offset_index = 0;
+    size_t offset_remain_rows = 0;
+    size_t output_rows = 0;
+    size_t max_block_size = DEFAULT_BLOCK_SIZE;
+    bool stream = true;
+};
+template<bool is_any_join>
+StreamReplicateBlocks<is_any_join>::StreamReplicateBlocks(const Block & block_, std::vector<size_t> right_col_idx_, std::shared_ptr<AddedColumns<is_any_join>> added_columns_, std::unique_ptr<IColumn::Offsets> offsets_to_replicate_, const std::vector<size_t> & need_replicate_pos_, size_t max_block_size_)
+    : block(block_), right_col_idx(right_col_idx_), added_columns(added_columns_), offsets_to_replicate(std::move(offsets_to_replicate_)), need_replicate_pos(need_replicate_pos_), max_block_size(max_block_size_ ? max_block_size_ : DEFAULT_BLOCK_SIZE)
+{
+}
+template <bool is_any_join>
+Block StreamReplicateBlocks<is_any_join>::nextImpl()
+{
+    if constexpr (is_any_join)
+    {
+        finished.store(true);
+        for (const auto & i : need_replicate_pos)
+        {
+            block.safeGetByPosition(i).column =
+                block.safeGetByPosition(i).column->replicate(*offsets_to_replicate);
+        }
+        materializeAddedColumns(0, 0);
+        return block;
+    }
+    if (need_replicate_pos.empty() || !offsets_to_replicate)
+    {
+        finished.store(true);
+        materializeAddedColumns(0, 0);
+        return block;
+    }
+    if (offsets_to_replicate->back() < max_block_size || !stream)
+    {
+        finished.store(true);
+        for (const auto & i : need_replicate_pos)
+        {
+            block.safeGetByPosition(i).column =
+                block.safeGetByPosition(i).column->replicate(*offsets_to_replicate);
+        }
+        materializeAddedColumns(0, offsets_to_replicate->back());
+        return block;
+    }
+    IColumn::Offsets tmp_offsets_to_replicate;
+    size_t replicate_rows = 0;
+    size_t start_offset = offset_index;
+    // Split offsets_to_replicate according to max_block_size
+    while (offset_index < offsets_to_replicate->size() && replicate_rows < max_block_size)
+    {
+        auto current_offset_row = offset_index == 0 ? (*offsets_to_replicate)[offset_index] : (*offsets_to_replicate)[offset_index] - (*offsets_to_replicate)[offset_index - 1];
+        auto row = offset_remain_rows == 0 ? current_offset_row : offset_remain_rows;
+        if (row + replicate_rows > max_block_size)
+        {
+            size_t remain_rows = max_block_size - replicate_rows;
+            replicate_rows += remain_rows;
+            tmp_offsets_to_replicate.emplace_back(replicate_rows);
+            offset_remain_rows = row - remain_rows;
+        }
+        else
+        {
+            offset_remain_rows = 0;
+            replicate_rows += row;
+            tmp_offsets_to_replicate.emplace_back(replicate_rows);
+            offset_index ++;
+        }
+    }
+    Block res = block.cloneEmpty();
+    std::set<size_t> visited_pos;
+    // block that generates output
+    for (const auto & i : need_replicate_pos)
+    {
+        visited_pos.emplace(i);
+        res.safeGetByPosition(i).column =
+            block.safeGetByPosition(i).column->cut(start_offset,tmp_offsets_to_replicate.size())->replicate(tmp_offsets_to_replicate);
+    }
+    // Additional splitting is required for columns that do not need to be replicated.
+    if (!added_columns)
+    {
+        for (size_t i = 0; i < block.columns(); ++i)
+        {
+            if (!visited_pos.contains(i))
+                res.safeGetByPosition(i).column =
+                    block.safeGetByPosition(i).column->cut(output_rows,replicate_rows);
+        }
+    }
+    else
+    {
+        auto columns = added_columns->getColumns(output_rows, replicate_rows);
+        size_t i = 0;
+        for (const auto & idx : right_col_idx)
+        {
+            res.safeGetByPosition(idx).column = std::move(columns[i].column);
+            i++;
+        }
+    }
+    output_rows += replicate_rows;
+    if (offset_index >= offsets_to_replicate->size()) finished.store(true);
+    return res;
+}
+template <bool is_any_join>
+StreamReplicateBlocks<is_any_join>::StreamReplicateBlocks(const Block & block_, std::vector<size_t> right_col_idx_, std::shared_ptr<AddedColumns<is_any_join>> added_columns_) : block(block_), right_col_idx(right_col_idx_), added_columns(added_columns_)
+{
+}
+template <bool is_any_join>
+StreamReplicateBlocks<is_any_join>::StreamReplicateBlocks(const Block & block_) : block(block_)
+{
+}
 
 template <JoinKind KIND, JoinStrictness STRICTNESS>
 struct JoinFeatures
@@ -1184,15 +1404,15 @@ public:
     }
 };
 
-template <typename Map, bool add_missing, bool multiple_disjuncts>
+template <typename Map, bool add_missing, bool is_any_join, bool multiple_disjuncts>
 void addFoundRowAll(
     const typename Map::mapped_type & mapped,
-    AddedColumns & added,
+    AddedColumns<is_any_join> & added,
     IColumn::Offset & current_offset,
     KnownRowsHolder<multiple_disjuncts> & known_rows [[maybe_unused]],
     JoinStuff::JoinUsedFlags * used_flags [[maybe_unused]])
 {
-    if constexpr (add_missing)
+    if constexpr (add_missing && is_any_join)
         added.applyLazyDefaults();
 
     if constexpr (multiple_disjuncts)
@@ -1203,7 +1423,7 @@ void addFoundRowAll(
         {
             if (!known_rows.isKnown(std::make_pair(it->block, it->row_num)))
             {
-                added.appendFromBlock<false>(*it->block, it->row_num);
+                added.template appendFromBlock<false>(*it->block, it->row_num);
                 ++current_offset;
                 if (!new_known_rows_ptr)
                 {
@@ -1227,14 +1447,14 @@ void addFoundRowAll(
     {
         for (auto it = mapped.begin(); it.ok(); ++it)
         {
-            added.appendFromBlock<false>(*it->block, it->row_num);
+            added.template appendFromBlock<false>(*it->block, it->row_num);
             ++current_offset;
         }
     }
 }
 
-template <bool add_missing, bool need_offset>
-void addNotFoundRow(AddedColumns & added [[maybe_unused]], IColumn::Offset & current_offset [[maybe_unused]])
+template <bool add_missing, bool need_offset, bool is_any_join>
+void addNotFoundRow(AddedColumns<is_any_join> & added [[maybe_unused]], IColumn::Offset & current_offset [[maybe_unused]])
 {
     if constexpr (add_missing)
     {
@@ -1253,11 +1473,11 @@ void setUsed(IColumn::Filter & filter [[maybe_unused]], size_t pos [[maybe_unuse
 
 /// Joins right table columns which indexes are present in right_indexes using specified map.
 /// Makes filter (1 if row presented in right table) and returns offsets to replicate (for ALL JOINS).
-template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, typename Map, bool need_filter, bool multiple_disjuncts>
+template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, typename Map, bool need_filter, bool multiple_disjuncts, bool is_any_join>
 NO_INLINE IColumn::Filter joinRightColumns(
     std::vector<KeyGetter> && key_getter_vector,
     const std::vector<const Map *> & mapv,
-    AddedColumns & added_columns,
+    AddedColumns<is_any_join> & added_columns,
     JoinStuff::JoinUsedFlags & used_flags [[maybe_unused]])
 {
     constexpr JoinFeatures<KIND, STRICTNESS> join_features;
@@ -1306,7 +1526,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
                         else
                             used_flags.template setUsed<join_features.need_flags, multiple_disjuncts>(find_result);
 
-                        added_columns.appendFromBlock<join_features.add_missing>(*row_ref.block, row_ref.row_num);
+                        added_columns.template appendFromBlock<join_features.add_missing>(*row_ref.block, row_ref.row_num);
                     }
                     else
                         addNotFoundRow<join_features.add_missing, join_features.need_replication>(added_columns, current_offset);
@@ -1326,7 +1546,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
                     {
                         auto used_flags_opt = join_features.need_flags ? &used_flags : nullptr;
                         setUsed<need_filter>(filter, i);
-                        addFoundRowAll<Map, join_features.add_missing>(mapped, added_columns, current_offset, known_rows, used_flags_opt);
+                        addFoundRowAll<Map, join_features.add_missing, is_any_join, multiple_disjuncts>(mapped, added_columns, current_offset, known_rows, used_flags_opt);
                     }
                 }
                 else if constexpr (join_features.is_any_join && KIND == JoinKind::Inner)
@@ -1337,7 +1557,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
                     if (used_once)
                     {
                         setUsed<need_filter>(filter, i);
-                        added_columns.appendFromBlock<join_features.add_missing>(*mapped.block, mapped.row_num);
+                        added_columns.template appendFromBlock<join_features.add_missing>(*mapped.block, mapped.row_num);
                     }
 
                     break;
@@ -1355,7 +1575,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
                 {
                     setUsed<need_filter>(filter, i);
                     used_flags.template setUsed<join_features.need_flags, multiple_disjuncts>(find_result);
-                    added_columns.appendFromBlock<join_features.add_missing>(*mapped.block, mapped.row_num);
+                    added_columns.template appendFromBlock<join_features.add_missing>(*mapped.block, mapped.row_num);
 
                     if (join_features.is_any_or_semi_join)
                     {
@@ -1378,43 +1598,43 @@ NO_INLINE IColumn::Filter joinRightColumns(
         }
     }
 
-    added_columns.applyLazyDefaults();
+//    added_columns.applyLazyDefaults();
     return filter;
 }
 
-template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, typename Map, bool need_filter>
+template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, typename Map, bool need_filter, bool is_any_join>
 IColumn::Filter joinRightColumnsSwitchMultipleDisjuncts(
     std::vector<KeyGetter> && key_getter_vector,
     const std::vector<const Map *> & mapv,
-    AddedColumns & added_columns,
+    AddedColumns<is_any_join> & added_columns,
     JoinStuff::JoinUsedFlags & used_flags [[maybe_unused]])
 {
     return mapv.size() > 1
-        ? joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, need_filter, true>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags)
-        : joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, need_filter, false>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags);
+        ? joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, need_filter, true, is_any_join>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags)
+        : joinRightColumns<KIND, STRICTNESS, KeyGetter, Map, need_filter, false, is_any_join>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags);
 }
 
-template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, typename Map>
+template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, bool is_any_join, typename Map>
 IColumn::Filter joinRightColumnsSwitchNullability(
     std::vector<KeyGetter> && key_getter_vector,
     const std::vector<const Map *> & mapv,
-    AddedColumns & added_columns,
+    AddedColumns<is_any_join> & added_columns,
     JoinStuff::JoinUsedFlags & used_flags)
 {
     if (added_columns.need_filter)
     {
-        return joinRightColumnsSwitchMultipleDisjuncts<KIND, STRICTNESS, KeyGetter, Map, true>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags);
+        return joinRightColumnsSwitchMultipleDisjuncts<KIND, STRICTNESS, KeyGetter, Map, true, is_any_join>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags);
     }
     else
     {
-        return joinRightColumnsSwitchMultipleDisjuncts<KIND, STRICTNESS, KeyGetter, Map, true>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags);
+        return joinRightColumnsSwitchMultipleDisjuncts<KIND, STRICTNESS, KeyGetter, Map, true, is_any_join>(std::forward<std::vector<KeyGetter>>(key_getter_vector), mapv, added_columns, used_flags);
     }
 }
 
-template <JoinKind KIND, JoinStrictness STRICTNESS, typename Maps>
+template <JoinKind KIND, JoinStrictness STRICTNESS, bool is_any_join, typename Maps>
 IColumn::Filter switchJoinRightColumns(
     const std::vector<const Maps *> & mapv,
-    AddedColumns & added_columns,
+    AddedColumns<is_any_join> & added_columns,
     HashJoin::Type type,
     JoinStuff::JoinUsedFlags & used_flags)
 {
@@ -1432,7 +1652,7 @@ IColumn::Filter switchJoinRightColumns(
                 using MapTypeVal = typename KeyGetter::MappedType;
                 std::vector<const MapTypeVal *> a_map_type_vector;
                 a_map_type_vector.emplace_back();
-                return joinRightColumnsSwitchNullability<KIND, STRICTNESS, KeyGetter>(
+                return joinRightColumnsSwitchNullability<KIND, STRICTNESS, KeyGetter, is_any_join>(
                         std::move(key_getter_vector), a_map_type_vector, added_columns, used_flags);
             }
             throw Exception(ErrorCodes::UNSUPPORTED_JOIN_KEYS, "Unsupported JOIN keys. Type: {}", type);
@@ -1464,11 +1684,11 @@ IColumn::Filter switchJoinRightColumns(
 } /// nameless
 
 template <JoinKind KIND, JoinStrictness STRICTNESS, typename Maps>
-void HashJoin::joinBlockImpl(
+IBlocksStreamPtr HashJoin::joinBlockImpl(
     Block & block,
     const Block & block_with_columns_to_add,
     const std::vector<const Maps *> & maps_,
-    bool is_join_get) const
+    bool is_join_get)
 {
     constexpr JoinFeatures<KIND, STRICTNESS> join_features;
 
@@ -1495,7 +1715,7 @@ void HashJoin::joinBlockImpl(
       *  but they will not be used at this stage of joining (and will be in `AdderNonJoined`), and they need to be skipped.
       * For ASOF, the last column is used as the ASOF column
       */
-    AddedColumns added_columns(
+    std::shared_ptr<AddedColumns<join_features.is_any_join>> added_columns = std::make_shared<AddedColumns<join_features.is_any_join>>(
         block_with_columns_to_add,
         block,
         savedBlockSample(),
@@ -1505,12 +1725,16 @@ void HashJoin::joinBlockImpl(
         is_join_get);
 
     bool has_required_right_keys = (required_right_keys.columns() != 0);
-    added_columns.need_filter = join_features.need_filter || has_required_right_keys;
+    added_columns->need_filter = join_features.need_filter || has_required_right_keys;
 
-    IColumn::Filter row_filter = switchJoinRightColumns<KIND, STRICTNESS>(maps_, added_columns, data->type, used_flags);
+    IColumn::Filter row_filter = switchJoinRightColumns<KIND, STRICTNESS, join_features.is_any_join>(maps_, *added_columns, data->type, used_flags);
 
-    for (size_t i = 0; i < added_columns.size(); ++i)
-        block.insert(added_columns.moveColumn(i));
+    std::vector<size_t> right_col_idx;
+    for (size_t i = 0; i < added_columns->size(); ++i)
+    {
+        block.insert(added_columns->getEmptyColumn(i));
+        right_col_idx.emplace_back(existing_columns + i);
+    }
 
     std::vector<size_t> right_keys_to_replicate [[maybe_unused]];
 
@@ -1584,19 +1808,20 @@ void HashJoin::joinBlockImpl(
 
     if constexpr (join_features.need_replication)
     {
-        std::unique_ptr<IColumn::Offsets> & offsets_to_replicate = added_columns.offsets_to_replicate;
-
-        /// If ALL ... JOIN - we replicate all the columns except the new ones.
+        std::unique_ptr<IColumn::Offsets> & offsets_to_replicate = added_columns->offsets_to_replicate;
+        std::vector<size_t> need_replicate_columns;
         for (size_t i = 0; i < existing_columns; ++i)
-            block.safeGetByPosition(i).column = block.safeGetByPosition(i).column->replicate(*offsets_to_replicate);
-
-        /// Replicate additional right keys
-        for (size_t pos : right_keys_to_replicate)
-            block.safeGetByPosition(pos).column = block.safeGetByPosition(pos).column->replicate(*offsets_to_replicate);
+            need_replicate_columns.emplace_back(i);
+        need_replicate_columns.insert(need_replicate_columns.end(), right_keys_to_replicate.begin(), right_keys_to_replicate.end());
+        return std::make_shared<StreamReplicateBlocks<join_features.is_any_join>>(block, right_col_idx, added_columns, std::move(offsets_to_replicate), need_replicate_columns, table_join->maxJoinedBlockRows());
+    }
+    else
+    {
+        return std::make_shared<StreamReplicateBlocks<join_features.is_any_join>>(block, right_col_idx, added_columns);
     }
 }
 
-void HashJoin::joinBlockImplCross(Block & block, ExtraBlockPtr & not_processed) const
+IBlocksStreamPtr HashJoin::joinBlockImplCross(Block & block, ExtraBlockPtr & not_processed)
 {
     size_t max_joined_block_rows = table_join->maxJoinedBlockRows();
     size_t start_left_row = 0;
@@ -1672,6 +1897,7 @@ void HashJoin::joinBlockImplCross(Block & block, ExtraBlockPtr & not_processed) 
         block.insert(src_column);
 
     block = block.cloneWithColumns(std::move(dst_columns));
+    return std::make_shared<StreamReplicateBlocks<false>>(block);
 }
 
 DataTypePtr HashJoin::joinGetCheckAndGetReturnType(const DataTypes & data_types, const String & column_name, bool or_null) const
@@ -1704,7 +1930,7 @@ DataTypePtr HashJoin::joinGetCheckAndGetReturnType(const DataTypes & data_types,
 
 /// TODO: return multiple columns as named tuple
 /// TODO: return array of values when strictness == JoinStrictness::All
-ColumnWithTypeAndName HashJoin::joinGet(const Block & block, const Block & block_with_columns_to_add) const
+ColumnWithTypeAndName HashJoin::joinGet(const Block & block, const Block & block_with_columns_to_add)
 {
     bool is_valid = (strictness == JoinStrictness::Any || strictness == JoinStrictness::RightAny)
         && kind == JoinKind::Left;
@@ -1726,8 +1952,9 @@ ColumnWithTypeAndName HashJoin::joinGet(const Block & block, const Block & block
 
     std::vector<const MapsOne *> maps_vector;
     maps_vector.push_back(&std::get<MapsOne>(data->maps[0]));
-    joinBlockImpl<JoinKind::Left, JoinStrictness::Any>(
+    auto blocks = joinBlockImpl<JoinKind::Left, JoinStrictness::Any>(
         keys, block_with_columns_to_add, maps_vector, true);
+    keys = blocks->next();
     return keys.getByPosition(keys.columns() - 1);
 }
 
@@ -1740,6 +1967,26 @@ void HashJoin::checkTypesOfKeys(const Block & block) const
 }
 
 void HashJoin::joinBlock(Block & block, ExtraBlockPtr & not_processed)
+{
+    auto stream_output = joinBlockWithStreamOutput(block, not_processed);
+    const bool is_any_join = strictness == JoinStrictness::Any;
+    if (is_any_join)
+    {
+        StreamReplicateBlocks<true> * stream_replicate_blocks = static_cast<StreamReplicateBlocks<true> *>(stream_output.get());
+        stream_replicate_blocks->disableStream();
+        auto res = stream_replicate_blocks->next();
+        block.swap(res);
+    }
+    else
+    {
+        StreamReplicateBlocks<false> * stream_replicate_blocks = static_cast<StreamReplicateBlocks<false> *>(stream_output.get());
+        stream_replicate_blocks->disableStream();
+        auto res = stream_replicate_blocks->next();
+        block.swap(res);
+    }
+}
+
+IBlocksStreamPtr HashJoin::joinBlockWithStreamOutput(Block & block, std::shared_ptr<ExtraBlock> & not_processed)
 {
     if (!data)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot join after data has been released");
@@ -1754,8 +2001,7 @@ void HashJoin::joinBlock(Block & block, ExtraBlockPtr & not_processed)
 
     if (kind == JoinKind::Cross)
     {
-        joinBlockImplCross(block, not_processed);
-        return;
+        return joinBlockImplCross(block, not_processed);
     }
 
     if (kind == JoinKind::Right || kind == JoinKind::Full)
@@ -1767,13 +2013,14 @@ void HashJoin::joinBlock(Block & block, ExtraBlockPtr & not_processed)
         std::vector<const std::decay_t<decltype(data->maps[0])> * > maps_vector;
         for (size_t i = 0; i < table_join->getClauses().size(); ++i)
             maps_vector.push_back(&data->maps[i]);
-
+        IBlocksStreamPtr blocks;
         if (joinDispatch(kind, strictness, maps_vector, [&](auto kind_, auto strictness_, auto & maps_vector_)
+                         {
+                             auto res = joinBlockImpl<kind_, strictness_>(block, sample_block_with_columns_to_add, maps_vector_);
+                             blocks.swap(res);
+                         }))
         {
-            joinBlockImpl<kind_, strictness_>(block, sample_block_with_columns_to_add, maps_vector_);
-        }))
-        {
-            /// Joined
+            return blocks;
         }
         else
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Wrong JOIN combination: {} {}", strictness, kind);
@@ -2118,4 +2365,8 @@ const ColumnWithTypeAndName & HashJoin::rightAsofKeyColumn() const
     return savedBlockSample().getByName(table_join->getOnlyClause().key_names_right.back());
 }
 
+bool HashJoin::supportStreamJoin() const
+{
+    return true;
+}
 }
