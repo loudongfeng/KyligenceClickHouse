@@ -66,6 +66,8 @@ public:
 
     size_t getApproxBytesReadForChunk() const override { return previous_approx_bytes_read_for_chunk; }
 
+    Stopwatch arrow_to_ch_watch;
+    uint64_t arrow_to_ch_us = 0;
 private:
     Chunk generate() override;
 
