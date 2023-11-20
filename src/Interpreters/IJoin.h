@@ -110,8 +110,6 @@ public:
     virtual bool supportStreamJoin() const { return false; }
     virtual IBlocksStreamPtr getStreamBlocks() { return nullptr; }
 
-    virtual bool supportStreamJoin() const { return false; }
-
 private:
     Block totals;
 };
