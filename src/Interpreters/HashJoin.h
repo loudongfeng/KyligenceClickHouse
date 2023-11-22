@@ -173,7 +173,7 @@ public:
     DataTypePtr joinGetCheckAndGetReturnType(const DataTypes & data_types, const String & column_name, bool or_null) const;
 
     /// Used by joinGet function that turns StorageJoin into a dictionary.
-    ColumnWithTypeAndName joinGet(const Block & block, const Block & block_with_columns_to_add) const;
+    ColumnWithTypeAndName joinGet(const Block & block, const Block & block_with_columns_to_add);
 
     bool isFilled() const override { return from_storage_join; }
 
