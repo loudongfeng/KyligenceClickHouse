@@ -197,6 +197,7 @@ public:
 
     bool hasAnalyzedResult() const { return analyzed_result_ptr != nullptr; }
     void setAnalyzedResult(MergeTreeDataSelectAnalysisResultPtr analyzed_result_ptr_) { analyzed_result_ptr = std::move(analyzed_result_ptr_); }
+    ReadFromMergeTree::AnalysisResult getAnalysisResult() const;
 
     const MergeTreeData::DataPartsVector & getParts() const { return prepared_parts; }
     const std::vector<AlterConversionsPtr> & getAlterConvertionsForParts() const { return alter_conversions_for_parts; }
@@ -294,7 +295,7 @@ private:
     Pipe spreadMarkRangesAmongStreamsFinal(
         RangesInDataParts && parts, size_t num_streams, const Names & origin_column_names, const Names & column_names, ActionsDAGPtr & out_projection);
 
-    ReadFromMergeTree::AnalysisResult getAnalysisResult() const;
+
     MergeTreeDataSelectAnalysisResultPtr analyzed_result_ptr;
 
     bool is_parallel_reading_from_replicas;
