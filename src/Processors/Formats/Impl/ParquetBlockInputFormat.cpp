@@ -382,49 +382,6 @@ static std::vector<Range> getHyperrectangleForRowGroup(
     return getHyperrectangleFromStatistics(header, format_settings, name_to_statistics);
 }
 
-static std::vector<Range> getHyperrectangleForPage(
-    const bool is_null_wanted,
-    const bool is_null_page,
-    const std::string & min_value,
-    const std::string & max_value,
-    const Block & header,
-    const FormatSettings & format_settings,
-    const parquet::ColumnDescriptor * descr)
-{
-    auto column_name_for_lookup = [&](std::string column_name) -> std::string
-    {
-        if (format_settings.parquet.case_insensitive_column_matching)
-            boost::to_lower(column_name);
-        return column_name;
-    };
-
-    if (is_null_page)
-    {
-        std::vector ret(header.columns(), Range::createWholeUniverse());
-        ret.at(0) = Range(Null::Value::NegativeInfinity, true, Null::Value::NegativeInfinity, true);
-        return ret;
-    }
-
-    std::shared_ptr<parquet::Statistics> stats;
-    /// Page index does not contain enough statistics. E.g. we don't know whether a page contains NULL or not.
-    /// So we have to create a fake one.
-    if (is_null_wanted)
-    {
-        // if null is wanted, we have to assume that the page contains null
-        stats = parquet::Statistics::Make(descr, min_value, max_value, 1, 1, 1, true, true, true);
-    }
-    else
-    {
-        // if null is not wanted, we can assume this page does not contain null
-        // so that getHyperrectangleFromStatistics will return a much narrower range
-        stats = parquet::Statistics::Make(descr, min_value, max_value, 1, 0, 1, true, true, true);
-    }
-    std::unordered_map<std::string, std::shared_ptr<parquet::Statistics>> name_to_statistics;
-    name_to_statistics.emplace(column_name_for_lookup(descr->name()), stats);
-
-    return getHyperrectangleFromStatistics(header, format_settings, name_to_statistics);
-}
-
 
 ParquetBlockInputFormat::ParquetBlockInputFormat(
     ReadBuffer & buf,
@@ -457,50 +414,34 @@ ParquetBlockInputFormat::~ParquetBlockInputFormat()
 //    rows are aligned among pages, but unfortunatedly it's not.
 void ParquetBlockInputFormat::applyRowRangesFromPageIndex(const std::unique_ptr<parquet::ParquetFileReader> & parquet_reader, int row_group)
 {
-    if (metadata->RowGroup(row_group)->ColumnChunk(0)->path_in_schema()->ToDotVector().size() != 1)
-        return; // compound types not supported
+
+//    static const local_engine::ColumnIndexFilter::ColumnIndexStore column_index_store = buildTestColumnIndexStore();
+//    const local_engine::ColumnIndexFilter filter(filter_node, Context::getGlobalContextInstance());
+//    filter.calculateRowRanges(column_index_store, TOTALSIZE)
+//    if (metadata->RowGroup(row_group)->ColumnChunk(0)->path_in_schema()->ToDotVector().size() != 1)
+//        return; // compound types not supported
 
     const auto pg_idx_reader = parquet_reader->GetPageIndexReader()->RowGroup(row_group);
     if (pg_idx_reader == nullptr)
         return;
-
-    const auto first_col_idx = pg_idx_reader->GetColumnIndex(0);
-    const auto first_col_offsets = pg_idx_reader->GetOffsetIndex(0);
-    if (first_col_idx != nullptr
-        && (first_col_idx->boundary_order() == parquet::BoundaryOrder::Ascending
-            || first_col_idx->boundary_order() == parquet::BoundaryOrder::Descending))
+    auto rowgroup_metadata = parquet_reader->metadata()->RowGroup(row_group);
+    int num_cols = rowgroup_metadata->num_columns();
+    local_engine::ColumnIndexFilter::ColumnIndexStore column_index_store;
+    for (int i = 0; i < num_cols; ++i)
     {
-        auto row_ranges = std::make_shared<parquet::RowRanges>();
-        auto null_pages = first_col_idx->null_pages();
-        const auto min_values = first_col_idx->encoded_min_values();
-        const auto max_values = first_col_idx->encoded_max_values();
-
-        std::vector<Range> probe_range(getPort().getHeader().columns(), Range::createWholeUniverse());
-        probe_range.at(0) = Range(NEGATIVE_INFINITY, true, NEGATIVE_INFINITY, true);
-        // probe_range limits the range of first column to be NULL only.
-        // If the probe result is true, it means where condition contains "first_col is NULL AND ...",
-        // it also means rows with first_col being null is wanted by where condition.
-        const bool null_wanted = key_condition->checkInHyperrectangle(probe_range, getPort().getHeader().getDataTypes()).can_be_true;
-
-        for (size_t i = 0; i < null_pages.size(); ++i)
-        {
-            auto page_hyperrectangle = getHyperrectangleForPage(
-                null_wanted,
-                null_pages.at(i),
-                min_values.at(i),
-                max_values.at(i),
-                getPort().getHeader(),
-                format_settings,
-                metadata->schema()->Column(0));
-            if (key_condition->checkInHyperrectangle(page_hyperrectangle, getPort().getHeader().getDataTypes()).can_be_true)
-            {
-                auto to = (i == null_pages.size() - 1) ? metadata->RowGroup(row_group)->num_rows() - 1
-                                                       : first_col_offsets->page_locations().at(i + 1).first_row_index - 1;
-                row_ranges->add(parquet::Range(first_col_offsets->page_locations().at(i).first_row_index, to), false);
-            }
-        }
-        row_group_batches.back().row_ranges_map.insert(std::make_pair(row_group, row_ranges));
+        const auto *const col_desc = metadata->RowGroup(row_group)->schema()->Column(i);
+        const auto col_idx = pg_idx_reader->GetColumnIndex(i);
+        const auto offset_idx = pg_idx_reader->GetOffsetIndex(i);
+        column_index_store[col_desc->name()] = local_engine::ColumnIndex::Make(col_desc, col_idx, offset_idx);
     }
+    const local_engine::ColumnIndexFilter filter(filter_node.get(), Context::getGlobalContextInstance());
+    const std::vector<local_engine::Range> & local_row_ranges = filter.calculateRowRanges(column_index_store, rowgroup_metadata->num_rows()).getRanges();
+    auto row_ranges = std::make_shared<parquet::RowRanges>();
+    for(auto local_range : local_row_ranges)
+    {
+        row_ranges->add(parquet::Range(local_range.from, local_range.to), false);
+    }
+    row_group_batches.back().row_ranges_map.insert(std::make_pair(row_group, row_ranges));
 }
 
 void ParquetBlockInputFormat::initializeIfNeeded()

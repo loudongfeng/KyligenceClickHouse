@@ -6,6 +6,9 @@
 #include <Processors/Formats/ISchemaReader.h>
 #include <Formats/FormatSettings.h>
 #include <Storages/MergeTree/KeyCondition.h>
+#include <Storages/ch_parquet/ColumnIndexFilter.h>
+#include <Storages/ch_parquet/ParquetConverter.h>
+#include <Storages/ch_parquet/RowRanges.h>
 
 #include <parquet/column_reader.h>
 #include <parquet/file_reader.h>

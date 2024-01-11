@@ -15,6 +15,7 @@ class SourceWithKeyCondition : public ISource
 protected:
     /// Represents pushed down filters in source
     std::shared_ptr<const KeyCondition> key_condition;
+    std::shared_ptr<const DB::ActionsDAG::Node> filter_node;
 
     void setKeyConditionImpl(const SelectQueryInfo & query_info, ContextPtr context, const Block & keys)
     {
@@ -36,6 +37,8 @@ protected:
             for (const auto & column : keys.getColumnsWithTypeAndName())
                 node_name_to_input_column.insert({column.name, column});
 
+            filter_node = std::make_shared<const DB::ActionsDAG::Node>(*nodes[0]);
+
             auto filter_actions_dag = ActionsDAG::buildFilterActionsDAG(nodes, node_name_to_input_column, context);
             key_condition = std::make_shared<const KeyCondition>(
                 filter_actions_dag,
@@ -51,6 +54,13 @@ public:
 
     /// Set key_condition directly. It is used for filter push down in source.
     virtual void setKeyCondition(const std::shared_ptr<const KeyCondition> & key_condition_) { key_condition = key_condition_; }
+
+    /// Set key_condition and filter_node directly. It is used for filter push down in source.
+    virtual void setKeyCondition(const std::shared_ptr<const KeyCondition> & key_condition_, const std::shared_ptr<const DB::ActionsDAG::Node> & filter_node_)
+    {
+        key_condition = key_condition_;
+        filter_node = filter_node_;
+    }
 
     /// Set key_condition created by query_info and context. It is used for filter push down when allow_experimental_analyzer is false.
     virtual void setKeyCondition(const SelectQueryInfo & /*query_info*/, ContextPtr /*context*/) { }

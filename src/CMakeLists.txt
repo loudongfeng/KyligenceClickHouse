@@ -280,6 +280,7 @@ macro (dbms_target_include_directories)
 endmacro ()
 
 dbms_target_include_directories (PUBLIC "${ClickHouse_SOURCE_DIR}/src" "${ClickHouse_BINARY_DIR}/src")
+dbms_target_include_directories (PUBLIC "${ClickHouse_SOURCE_DIR}/utils/extern-local-engine")
 target_include_directories (clickhouse_common_io PUBLIC "${ClickHouse_SOURCE_DIR}/src" "${ClickHouse_BINARY_DIR}/src")
 
 if (TARGET ch_contrib::llvm)
