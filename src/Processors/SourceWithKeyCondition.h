@@ -37,8 +37,7 @@ protected:
             for (const auto & column : keys.getColumnsWithTypeAndName())
                 node_name_to_input_column.insert({column.name, column});
 
-            filter_node = std::make_shared<const DB::ActionsDAG::Node>(*nodes[0]);
-
+            filter_node = nodes.empty() ? nullptr : std::make_shared<const DB::ActionsDAG::Node>(*nodes[0]);
             auto filter_actions_dag = ActionsDAG::buildFilterActionsDAG(nodes, node_name_to_input_column, context);
             key_condition = std::make_shared<const KeyCondition>(
                 filter_actions_dag,

@@ -215,7 +215,7 @@ private:
         size_t total_bytes_compressed = 0;
 
         std::vector<int> row_groups_idxs;
-        std::map<int, parquet::RowRangesPtr> row_ranges_map;
+        std::unordered_map<int, parquet::RowRanges> row_ranges_map;
 
         // These are only used by the decoding thread, so don't require locking the mutex.
         std::unique_ptr<parquet::arrow::FileReader> file_reader;

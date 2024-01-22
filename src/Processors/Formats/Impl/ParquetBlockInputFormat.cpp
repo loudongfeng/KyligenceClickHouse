@@ -432,16 +432,21 @@ void ParquetBlockInputFormat::applyRowRangesFromPageIndex(const std::unique_ptr<
         const auto *const col_desc = metadata->RowGroup(row_group)->schema()->Column(i);
         const auto col_idx = pg_idx_reader->GetColumnIndex(i);
         const auto offset_idx = pg_idx_reader->GetOffsetIndex(i);
-        column_index_store[col_desc->name()] = local_engine::ColumnIndex::Make(col_desc, col_idx, offset_idx);
+        std::string col_name = col_desc->name();
+        boost::to_lower(col_name);
+        column_index_store[col_name] = local_engine::ColumnIndex::Make(col_desc, col_idx, offset_idx);
     }
+    if (filter_node == nullptr)
+        return;
+
     const local_engine::ColumnIndexFilter filter(filter_node.get(), Context::getGlobalContextInstance());
-    const std::vector<local_engine::Range> & local_row_ranges = filter.calculateRowRanges(column_index_store, rowgroup_metadata->num_rows()).getRanges();
+    local_engine::RowRanges local_row_ranges = filter.calculateRowRanges(column_index_store, rowgroup_metadata->num_rows());
     auto row_ranges = std::make_shared<parquet::RowRanges>();
-    for(auto local_range : local_row_ranges)
+    for(auto local_range : local_row_ranges.getRanges())
     {
-        row_ranges->add(parquet::Range(local_range.from, local_range.to), false);
+        row_ranges->Add(parquet::RowRanges::Range({static_cast<int64_t>(local_range.from), static_cast<int64_t>(local_range.to)}));
     }
-    row_group_batches.back().row_ranges_map.insert(std::make_pair(row_group, row_ranges));
+    row_group_batches.back().row_ranges_map[row_group] = std::move(*row_ranges);
 }
 
 void ParquetBlockInputFormat::initializeIfNeeded()
@@ -545,10 +550,11 @@ void ParquetBlockInputFormat::initializeRowGroupBatchReader(size_t row_group_bat
     // TODO: Pass custom memory_pool() to enable memory accounting with non-jemalloc allocators.
     THROW_ARROW_NOT_OK(builder.Build(&row_group_batch.file_reader));
 
+    std::optional<std::unordered_map<int, ::parquet::RowRanges>> row_ranges_opt(std::move(row_group_batch.row_ranges_map));
     THROW_ARROW_NOT_OK(row_group_batch.file_reader->GetRecordBatchReader(
         row_group_batch.row_groups_idxs,
         column_indices,
-        std::make_shared<std::map<int, parquet::RowRangesPtr>>(std::move(row_group_batch.row_ranges_map)),
+        row_ranges_opt,
         &row_group_batch.record_batch_reader));
 
     row_group_batch.arrow_column_to_ch_column = std::make_unique<ArrowColumnToCHColumn>(
