@@ -43,7 +43,7 @@ FullMergeJoinCursorPtr createCursor(const Block & block, const Names & columns)
 }
 
 template <bool has_left_nulls, bool has_right_nulls>
-int nullableCompareAt(const IColumn & left_column, const IColumn & right_column, size_t lhs_pos, size_t rhs_pos, int null_direction_hint = 1)
+int nullableCompareAt(const IColumn & left_column, const IColumn & right_column, size_t lhs_pos, size_t rhs_pos, int null_direction_hint = -1)
 {
     if constexpr (has_left_nulls && has_right_nulls)
     {
